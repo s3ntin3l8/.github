@@ -75,7 +75,11 @@ When you change what permissions a workflow needs, update the per-workflow
   opt into coverage by passing `test-script: 'test:coverage'`. When coverage is
   generated as an istanbul `json-summary` report (`coverage/coverage-summary.json` —
   vitest v8, jest, c8, …), it is uploaded to Codecov and an optional
-  `coverage-fail-under` threshold can be enforced.
+  `coverage-fail-under` threshold can be enforced. Similarly, `typecheck-script`
+  (default `''` = skip) lets callers opt into type checking between lint and test
+  (e.g. `typecheck-script: 'typecheck'` for `npm run typecheck`), and `build-env`
+  passes extra `KEY=VALUE` env lines into the build step (e.g.
+  `NEXT_TELEMETRY_DISABLED=1`).
   For monorepos, `ci-node` also accepts `working-directory` (default `.`) and
   `cache-dependency-path` (default `package-lock.json`) inputs. The former
   applies to all `run:` steps via `defaults: run: working-directory`; the
@@ -102,6 +106,7 @@ jobs:
     uses: s3ntin3l8/.github/.github/workflows/ci-node.yml@main
     with:
       node-version: '24'
+      typecheck-script: 'typecheck'     # opt into type checking
       test-script: 'test:coverage'     # opt into coverage + Codecov upload
       coverage-fail-under: '80'         # optional: fail below 80%
     secrets: inherit

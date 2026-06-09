@@ -28,6 +28,21 @@ on:
         required: false
         type: string
         default: 'build'
+      build-env:
+        description: >-
+          Extra environment variables for the build step, one KEY=VALUE per
+          line (e.g. 'NEXT_TELEMETRY_DISABLED=1'). Blank and '#' comment lines
+          are ignored. Empty (the default) sets nothing.
+        required: false
+        type: string
+        default: ''
+      typecheck-script:
+        description: >-
+          npm script for type checking (e.g. 'typecheck'). Empty string (the
+          default) skips the step entirely. Pass 'typecheck' to opt in.
+        required: false
+        type: string
+        default: ''
       test-script:
         description: >-
           npm script to run for tests. Set to 'test:coverage' (or any script
@@ -93,6 +108,17 @@ jobs:
             npm run lint
           else
             echo "No lint script defined; skipping."
+          fi
+      - name: Typecheck
+        if: ${{ inputs.typecheck-script != '' }}
+        env:
+          TYPECHECK_SCRIPT: ${{ inputs.typecheck-script }}
+        run: |
+          tc_val=$(npm pkg get "scripts.$TYPECHECK_SCRIPT")
+          if [ "$tc_val" = "{}" ] || [ -z "$tc_val" ]; then
+            echo "No '$TYPECHECK_SCRIPT' script defined; skipping."
+          else
+            npm run "$TYPECHECK_SCRIPT"
           fi
       - name: Test
         env:
@@ -172,9 +198,17 @@ jobs:
       - name: Build
         env:
           BUILD_SCRIPT: ${{ inputs.build-script }}
+          BUILD_ENV: ${{ inputs.build-env }}
         run: |
           build=$(npm pkg get "scripts.$BUILD_SCRIPT")
           if [ "$build" != "{}" ] && [ -n "$build" ]; then
+            # Export caller-provided build env (KEY=VALUE lines), scoped to this step.
+            if [ -n "$BUILD_ENV" ]; then
+              while IFS= read -r line; do
+                case "$line" in ''|'#'*) continue ;; esac
+                export "$line"
+              done <<< "$BUILD_ENV"
+            fi
             npm run "$BUILD_SCRIPT"
           else
             echo "No '$BUILD_SCRIPT' script defined; skipping build."
