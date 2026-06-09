@@ -28,6 +28,7 @@ Runs `lint`/`test` npm scripts when present (the default `npm init` `exit 1` tes
 - **Secrets:** `CODECOV_TOKEN` (optional) — pass via `secrets: inherit`.
 - **Inputs:** `node-version` (default `22`), `build-script` (default `build`), **`test-script`** (default `test`; set to `test:coverage` to enable coverage upload and threshold enforcement), **`coverage-fail-under`** (default `0` = disabled; set e.g. `80` to require ≥80% line coverage).
 - **Expects:** a `package-lock.json` (uses `npm ci`). For coverage, a test setup that writes an istanbul `json-summary` report to `coverage/coverage-summary.json` (vitest v8, jest, c8, …).
+- **Test Analytics (optional):** if the test runner emits JUnit XML (vitest `--reporter=junit --outputFile=./test-results/junit.xml`, or jest with jest-junit), it's uploaded to Codecov Test Analytics.
 
 ### [Docker-Publish](.github/workflows/docker-publish.yml)
 Multi-arch builds (amd64/arm64), GHCR push, and Cosign signing.

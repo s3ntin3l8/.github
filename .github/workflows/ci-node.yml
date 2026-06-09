@@ -102,6 +102,16 @@ jobs:
           directory: ./coverage
           flags: node
           fail_ci_if_error: false
+      - name: Upload test results to Codecov (Test Analytics)
+        # Enabled when the test runner emits JUnit XML — configure it in your
+        # project (vitest: --reporter=junit --outputFile=./test-results/junit.xml;
+        # jest: jest-junit). Uploaded even on test failure (the point of Analytics).
+        if: ${{ !cancelled() && (hashFiles('test-results/**/*.xml') != '' || hashFiles('junit.xml') != '') }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: node
+          fail_ci_if_error: false
       - name: Build
         env:
           BUILD_SCRIPT: ${{ inputs.build-script }}
