@@ -7,6 +7,23 @@ on:
         required: false
         type: string
         default: '22'
+      working-directory:
+        description: >-
+          Directory containing package.json (relative to the repo root). All
+          shell steps run here; `actions/setup-node` and Codecov paths are
+          computed relative to the repo root. Default '.' assumes a
+          top-level package.json.
+        required: false
+        type: string
+        default: '.'
+      cache-dependency-path:
+        description: >-
+          Path to the lockfile (relative to the repo root) for npm cache
+          keying. Default 'package-lock.json' assumes a top-level lockfile;
+          override to 'web/package-lock.json' (etc.) for monorepos.
+        required: false
+        type: string
+        default: 'package-lock.json'
       build-script:
         required: false
         type: string
@@ -54,6 +71,21 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    # `defaults: run` applies only to `run:` steps; `actions/setup-node` and
+    # the Codecov `uses:` steps run with the workspace root and need
+    # explicitly-constructed paths (see WD_PREFIX env var below).
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    # WD_PREFIX is either '' (working-directory == '.') or 'subdir/' (working-directory == 'subdir').
+    # All workspace-root-relative paths (codecov `directory:`, etc.) are
+    # constructed from this so they work whether the package lives at the
+    # repo root or in a subdirectory. The shell-based coverage/test-results
+    # checks below are NOT built from this — they use plain relative paths
+    # inside the `defaults: run: working-directory` and therefore naturally
+    # resolve correctly without manual prefixing.
+    env:
+      WD_PREFIX: ${{ inputs.working-directory == '.' && '' || format('{0}/', inputs.working-directory) }}
     steps:
       - uses: actions/checkout@v4
       - name: Set up Node.js
@@ -61,6 +93,7 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'npm'
+          cache-dependency-path: ${{ inputs.cache-dependency-path }}
       - name: Install dependencies
         run: npm ci
       # Detect scripts with `npm pkg get` (exact key lookup) instead of grepping
@@ -101,38 +134,62 @@ jobs:
           else
             npm run "$TEST_SCRIPT"
           fi
+      - name: Probe coverage artifacts
+        # `hashFiles()` in an `if:` is workspace-root-relative, which would
+        # miss files inside a non-default `working-directory`. Do the check
+        # in the shell (which inherits the working-directory from defaults)
+        # and surface the result as a step output for downstream steps.
+        # `always()` so the outputs are still set when the test step above
+        # fails — the coverage-upload step can then skip gracefully instead
+        # of the workflow bailing on a missing-output reference.
+        if: ${{ always() }}
+        id: probe
+        run: |
+          if [ -f coverage/coverage-summary.json ]; then
+            echo "has_coverage=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_coverage=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f junit.xml ] || ls test-results/*.xml >/dev/null 2>&1; then
+            echo "has_junit=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_junit=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Enforce coverage threshold
         # coverage-fail-under=0 disables the check (the default) so a brand-new
         # project doesn't fail out of the box. Only runs when an istanbul
         # json-summary report exists (vitest v8 / jest / c8).
-        if: ${{ inputs.coverage-fail-under != '0' }}
+        if: ${{ inputs.coverage-fail-under != '0' && steps.probe.outputs.has_coverage == 'true' }}
         env:
           COVERAGE_FAIL_UNDER: ${{ inputs.coverage-fail-under }}
         run: |
-          if [ ! -f coverage/coverage-summary.json ]; then
-            echo "::error::coverage-fail-under is set but coverage/coverage-summary.json was not found. Ensure your test script writes an istanbul json-summary report."
-            exit 1
-          fi
           pct=$(jq '.total.lines.pct' coverage/coverage-summary.json)
           echo "Total line coverage: ${pct}%"
           awk -v got="$pct" -v need="$COVERAGE_FAIL_UNDER" \
             'BEGIN { if (got+0 < need+0) { printf "::error::coverage %.1f%% below threshold %s%%\n", got, need; exit 1 } }'
+      - name: Enforce coverage threshold (missing report)
+        if: ${{ inputs.coverage-fail-under != '0' && steps.probe.outputs.has_coverage == 'false' }}
+        env:
+          COVERAGE_FAIL_UNDER: ${{ inputs.coverage-fail-under }}
+        run: |
+          echo "::error::coverage-fail-under is set but coverage/coverage-summary.json was not found. Ensure your test script writes an istanbul json-summary report."
+          exit 1
       - name: Upload coverage to Codecov
         # Upload if a coverage report was generated (istanbul json-summary writes
         # to coverage/). Not an error if absent — the project may not have
         # coverage configured.
-        if: ${{ hashFiles('coverage/coverage-summary.json') != '' }}
+        if: ${{ steps.probe.outputs.has_coverage == 'true' }}
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          directory: ./coverage
+          directory: ${{ format('{0}coverage', env.WD_PREFIX) }}
           flags: node
           fail_ci_if_error: false
       - name: Upload test results to Codecov (Test Analytics)
         # Enabled when the test runner emits JUnit XML — configure it in your
         # project (vitest: --reporter=junit --outputFile=./test-results/junit.xml;
         # jest: jest-junit). Uploaded even on test failure (the point of Analytics).
-        if: ${{ !cancelled() && (hashFiles('test-results/**/*.xml') != '' || hashFiles('junit.xml') != '') }}
+        if: ${{ !cancelled() && steps.probe.outputs.has_junit == 'true' }}
         uses: codecov/test-results-action@v1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

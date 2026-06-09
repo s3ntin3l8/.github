@@ -26,7 +26,15 @@ ruff, mypy, pytest+coverage, Codecov (coverage **and** Test Analytics), pip-audi
 Runs `lint` / `typecheck` (opt-in) / `test` npm scripts when present (the default `npm init` `exit 1` test stub is skipped), then builds.
 - **Caller permissions:** none beyond the default `contents: read`.
 - **Secrets:** `CODECOV_TOKEN` (optional) — pass via `secrets: inherit`.
-- **Inputs:** `node-version` (default `22`), `build-script` (default `build`), **`build-env`** (default `''`; extra env for the build step as `KEY=VALUE` lines, e.g. `NEXT_TELEMETRY_DISABLED=1`), **`typecheck-script`** (default `''` = skip; set to `typecheck` to run type checking between lint and test), **`test-script`** (default `test`; set to `test:coverage` to enable coverage upload and threshold enforcement), **`coverage-fail-under`** (default `0` = disabled; set e.g. `80` to require ≥80% line coverage).
+- **Inputs:**
+  - `node-version` (default `22`)
+  - `working-directory` (default `.`) — directory containing `package.json`, relative to the repo root. All shell steps run there; the Codecov `directory:` is computed relative to the repo root.
+  - `cache-dependency-path` (default `package-lock.json`) — path to the lockfile relative to the repo root, for npm cache keying. Override to `web/package-lock.json` for monorepos.
+  - `build-script` (default `build`)
+  - **`build-env`** (default `''`; extra env for the build step as `KEY=VALUE` lines, e.g. `NEXT_TELEMETRY_DISABLED=1`)
+  - **`typecheck-script`** (default `''` = skip; set to `typecheck` to run type checking between lint and test)
+  - **`test-script`** (default `test`; set to `test:coverage` to enable coverage upload and threshold enforcement)
+  - **`coverage-fail-under`** (default `0` = disabled; set e.g. `80` to require ≥80% line coverage)
 - **Expects:** a `package-lock.json` (uses `npm ci`). For coverage, a test setup that writes an istanbul `json-summary` report to `coverage/coverage-summary.json` (vitest v8, jest, c8, …).
 - **Test Analytics (optional):** if the test runner emits JUnit XML (vitest `--reporter=junit --outputFile=./test-results/junit.xml`, or jest with jest-junit), it's uploaded to Codecov Test Analytics.
 
@@ -76,9 +84,11 @@ jobs:
     uses: s3ntin3l8/.github/.github/workflows/ci-node.yml@main
     with:
       node-version: '24'
-      typecheck-script: 'typecheck'    # opt into type checking
-      test-script: 'test:coverage'    # opt into coverage + Codecov upload
-      coverage-fail-under: '80'        # optional: fail below 80%
+      working-directory: 'web'             # omit if package.json is at the repo root
+      cache-dependency-path: 'web/package-lock.json'   # ditto
+      typecheck-script: 'typecheck'        # opt into type checking
+      test-script: 'test:coverage'         # opt into coverage + Codecov upload
+      coverage-fail-under: '80'            # optional: fail below 80%
     secrets: inherit
   build-docker:
     needs: [test-python]

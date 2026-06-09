@@ -80,6 +80,16 @@ When you change what permissions a workflow needs, update the per-workflow
   (e.g. `typecheck-script: 'typecheck'` for `npm run typecheck`), and `build-env`
   passes extra `KEY=VALUE` env lines into the build step (e.g.
   `NEXT_TELEMETRY_DISABLED=1`).
+  For monorepos, `ci-node` also accepts `working-directory` (default `.`) and
+  `cache-dependency-path` (default `package-lock.json`) inputs. The former
+  applies to all `run:` steps via `defaults: run: working-directory`; the
+  latter is passed to `actions/setup-node`. `hashFiles()` is workspace-root
+  relative, so a `Probe coverage artifacts` step in the workflow does a
+  shell-based file existence check (which naturally respects
+  `working-directory`) and exposes the result as a step output that the
+  Codecov-upload steps use for their `if:` condition. The Codecov
+  `directory:` input is prefixed with `WD_PREFIX` so it stays
+  workspace-root-relative regardless of the working directory.
 - **Action versions** are bumped by Dependabot (the `github-actions` ecosystem is
   configured) — don't hand-pin unless fixing a specific break.
 
