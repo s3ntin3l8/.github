@@ -1,6 +1,6 @@
 # s3ntin3l8/.github
 
-This repository contains the "Platinum Standard" centralized workflows, security policies, and repository templates for my projects.
+This repository contains centralized workflows, security policies, and repository templates for my projects.
 
 ## 🚀 Reusable Workflows
 
