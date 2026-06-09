@@ -59,10 +59,12 @@ When you change what permissions a workflow needs, update the per-workflow
   (`pip install -e ".[dev]"`), else `requirements.txt` — so it works whether deps live
   in requirements files or pyproject. Don't hardcode repo-specific assumptions (e.g.
   the package name — use the `coverage-source` input, default `app`).
-  `ci-go` keeps itself layout-agnostic via a `pre-build-commands` escape hatch for
-  project-specific setup (most commonly stubbing `//go:embed` assets), and reads the
-  Go version from `go.mod` by default (override with `go-version-file` or
-  `go-version`).
+  `ci-go` keeps itself layout-agnostic via a convention hook: it runs
+  `.github/ci-prebuild.sh` if present (most commonly to stub `//go:embed` assets) —
+  reviewable, version-controlled, no command string passed through inputs. It reads
+  the Go version from `go.mod` by default (`go-version` is empty by default; setup-go
+  gives `go-version` precedence over `go-version-file`, so leave it empty for go.mod
+  to win).
 - **Detect npm scripts by exact key** (`npm pkg get scripts.X`), never by grepping
   `npm run` output (it matched substrings and ran the `npm init` `exit 1` stub).
 - **Action versions** are bumped by Dependabot (the `github-actions` ecosystem is

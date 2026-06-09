@@ -32,7 +32,8 @@ Runs `lint`/`test` npm scripts when present (the default `npm init` `exit 1` tes
 gofmt, `go vet`, `go build`, `go test -race` with coverage, Codecov upload, `govulncheck`.
 - **Caller permissions:** none beyond the default `contents: read`.
 - **Secrets:** `CODECOV_TOKEN` (optional) — pass via `secrets: inherit`.
-- **Inputs:** `go-version` (default `stable`), `go-version-file` (default `go.mod` — when present, Go version is derived from it), `pre-build-commands` (shell snippet run before build, useful for stubbing `//go:embed` assets), `coverage-fail-under` (default `0` = disabled).
+- **Inputs:** `go-version` (default empty — override the version, e.g. `'1.23'`), `go-version-file` (default `go.mod` — derives the version when `go-version` is empty), `coverage-fail-under` (default `0` = disabled).
+- **Pre-build hook:** if a `.github/ci-prebuild.sh` exists in the repo, it runs before build (e.g. to stub `//go:embed` assets). Keep that logic in the script — there is no command-string input.
 - **Expects:** a `go.mod` at the repo root (or override `go-version-file`).
 
 ### [Docker-Publish](.github/workflows/docker-publish.yml)

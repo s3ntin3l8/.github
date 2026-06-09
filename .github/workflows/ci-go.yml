@@ -4,20 +4,15 @@ on:
   workflow_call:
     inputs:
       go-version:
-        description: "Go version to use when no go-version-file is present (e.g. '1.23'). Ignored when go-version-file exists."
-        required: false
-        type: string
-        default: 'stable'
-      go-version-file:
-        description: "Path to a file containing a 'go X.Y' directive (e.g. 'go.mod'). When present, the Go version is derived from it and go-version is ignored."
-        required: false
-        type: string
-        default: 'go.mod'
-      pre-build-commands:
-        description: "Shell snippet to run before go build/test (e.g. stub embedded assets: 'mkdir -p web/dist && ...'). Leave empty to skip."
+        description: "Override the Go version (e.g. '1.23'). Leave empty (default) to derive it from go-version-file (go.mod). NOTE: setup-go gives go-version precedence over go-version-file when both are set, so this must be empty for go.mod to win."
         required: false
         type: string
         default: ''
+      go-version-file:
+        description: "Path to a file with a 'go X.Y' directive. Used to pick the Go version when go-version is empty (the default)."
+        required: false
+        type: string
+        default: 'go.mod'
       coverage-fail-under:
         description: "Minimum coverage percent required (0 disables the check, matching Go's -cover behavior)."
         required: false
@@ -31,6 +26,8 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
@@ -39,16 +36,28 @@ jobs:
           go-version: ${{ inputs.go-version }}
           go-version-file: ${{ inputs.go-version-file }}
           cache: true
-      - name: Run pre-build commands
-        # Escape hatch for project-specific setup (most commonly: stubbing
-        # //go:embed assets so the backend builds in isolation from the
-        # frontend). The workflow itself stays layout-agnostic.
-        if: ${{ inputs.pre-build-commands != '' }}
+      - name: Pre-build setup (optional)
+        # Convention-based escape hatch for project-specific setup — most
+        # commonly stubbing //go:embed assets so the backend builds in isolation
+        # from the frontend. Put the logic in a version-controlled, reviewable
+        # .github/ci-prebuild.sh; the workflow stays layout-agnostic and there is
+        # no command string passed through workflow inputs.
         shell: bash
-        run: ${{ inputs.pre-build-commands }}
-      - name: Format check with gofmt
         run: |
-          unformatted="$(gofmt -l $(git ls-files '*.go'))"
+          if [ -f .github/ci-prebuild.sh ]; then
+            echo "::group::pre-build (.github/ci-prebuild.sh)"
+            bash .github/ci-prebuild.sh
+            echo "::endgroup::"
+          fi
+      - name: Format check with gofmt
+        shell: bash
+        run: |
+          files="$(git ls-files '*.go')"
+          if [ -z "$files" ]; then
+            echo "No .go files; skipping gofmt."
+            exit 0
+          fi
+          unformatted="$(gofmt -l $files)"
           if [ -n "$unformatted" ]; then
             echo "::error::gofmt needed on:"; echo "$unformatted"; exit 1
           fi
@@ -70,10 +79,13 @@ jobs:
         # project doesn't fail out of the box. Bump the input in the caller
         # once the project has meaningful coverage to track.
         if: ${{ inputs.coverage-fail-under != '0' }}
+        shell: bash
+        env:
+          COVERAGE_FAIL_UNDER: ${{ inputs.coverage-fail-under }}
         run: |
           pct="$(go tool cover -func=coverage.txt | awk '/^total:/ {gsub("%","",$3); print $3}')"
           echo "Total coverage: ${pct}%"
-          awk -v got="$pct" -v need="${{ inputs.coverage-fail-under }}" \
+          awk -v got="$pct" -v need="$COVERAGE_FAIL_UNDER" \
             'BEGIN { if (got+0 < need+0) { printf "::error::coverage %.2f%% below threshold %.2f%%\n", got, need; exit 1 } }'
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
