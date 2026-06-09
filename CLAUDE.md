@@ -77,7 +77,9 @@ When you change what permissions a workflow needs, update the per-workflow
   vitest v8, jest, c8, …), it is uploaded to Codecov and an optional
   `coverage-fail-under` threshold can be enforced. Similarly, `typecheck-script`
   (default `''` = skip) lets callers opt into type checking between lint and test
-  (e.g. `typecheck-script: 'typecheck'` for `npm run typecheck`).
+  (e.g. `typecheck-script: 'typecheck'` for `npm run typecheck`), and `build-env`
+  passes extra `KEY=VALUE` env lines into the build step (e.g.
+  `NEXT_TELEMETRY_DISABLED=1`).
 - **Action versions** are bumped by Dependabot (the `github-actions` ecosystem is
   configured) — don't hand-pin unless fixing a specific break.
 

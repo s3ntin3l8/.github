@@ -11,6 +11,14 @@ on:
         required: false
         type: string
         default: 'build'
+      build-env:
+        description: >-
+          Extra environment variables for the build step, one KEY=VALUE per
+          line (e.g. 'NEXT_TELEMETRY_DISABLED=1'). Blank and '#' comment lines
+          are ignored. Empty (the default) sets nothing.
+        required: false
+        type: string
+        default: ''
       typecheck-script:
         description: >-
           npm script for type checking (e.g. 'typecheck'). Empty string (the
@@ -133,9 +141,17 @@ jobs:
       - name: Build
         env:
           BUILD_SCRIPT: ${{ inputs.build-script }}
+          BUILD_ENV: ${{ inputs.build-env }}
         run: |
           build=$(npm pkg get "scripts.$BUILD_SCRIPT")
           if [ "$build" != "{}" ] && [ -n "$build" ]; then
+            # Export caller-provided build env (KEY=VALUE lines), scoped to this step.
+            if [ -n "$BUILD_ENV" ]; then
+              while IFS= read -r line; do
+                case "$line" in ''|'#'*) continue ;; esac
+                export "$line"
+              done <<< "$BUILD_ENV"
+            fi
             npm run "$BUILD_SCRIPT"
           else
             echo "No '$BUILD_SCRIPT' script defined; skipping build."
