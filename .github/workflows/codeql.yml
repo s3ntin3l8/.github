@@ -24,8 +24,10 @@ jobs:
     steps:
       - name: Normalize languages input to a JSON array
         id: parse
+        env:
+          LANGUAGES: ${{ inputs.languages }}
         run: |
-          raw=$(printf '%s' '${{ inputs.languages }}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          raw=$(printf '%s' "$LANGUAGES" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
           case "$raw" in
             \[*)  json="$raw" ;;                   # already a JSON array
             *\"*) json="[$raw]" ;;                 # legacy pre-quoted fragment -> wrap
