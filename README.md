@@ -28,6 +28,13 @@ Runs `lint`/`test` npm scripts when present (the default `npm init` `exit 1` tes
 - **Inputs:** `node-version`, `build-script` (default `build`).
 - **Expects:** a `package-lock.json` (uses `npm ci`).
 
+### [CI-Go](.github/workflows/ci-go.yml)
+gofmt, `go vet`, `go build`, `go test -race` with coverage, Codecov upload, `govulncheck`.
+- **Caller permissions:** none beyond the default `contents: read`.
+- **Secrets:** `CODECOV_TOKEN` (optional) — pass via `secrets: inherit`.
+- **Inputs:** `go-version` (default `stable`), `go-version-file` (default `go.mod` — when present, Go version is derived from it), `pre-build-commands` (shell snippet run before build, useful for stubbing `//go:embed` assets), `coverage-fail-under` (default `0` = disabled).
+- **Expects:** a `go.mod` at the repo root (or override `go-version-file`).
+
 ### [Docker-Publish](.github/workflows/docker-publish.yml)
 Multi-arch builds (amd64/arm64), GHCR push, and Cosign signing.
 - **Caller permissions (required):** `contents: read`, `packages: write`, `id-token: write`.
@@ -85,6 +92,10 @@ These are templates you can copy into your local projects to standardize your de
 - [pre-commit.yaml](blueprints/python/pre-commit.yaml) - Standard Python linting and testing hooks.
 - [pyproject.toml](blueprints/python/pyproject.toml) - Pre-tuned Ruff and Mypy configuration.
 - [README.md.template](blueprints/python/README.md.template) - High-signal project README template.
+
+### [Go Blueprints](blueprints/go/)
+- [Makefile](blueprints/go/Makefile) - Standard Go dev environment setup (lint, test, build, fmt, vet, tidy, vulncheck, clean).
+- [pre-commit.yaml](blueprints/go/pre-commit.yaml) - Standard Go pre-commit hooks (gofmt, go vet, go mod tidy, go test, govulncheck).
 
 ## 🛡️ Templates
 - [dependabot.yml](dependabot.yml) - Recommended configuration for weekly dependency updates.

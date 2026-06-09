@@ -33,7 +33,7 @@ When you change what permissions a workflow needs, update the per-workflow
 
 | Workflow | Required caller `permissions:` |
 |----------|-------------------------------|
-| `ci-python` / `ci-node` | none beyond default `contents: read` |
+| `ci-python` / `ci-node` / `ci-go` | none beyond default `contents: read` |
 | `docker-publish` | `contents: read`, `packages: write`, `id-token: write` |
 | `codeql` | `actions: read`, `contents: read`, `security-events: write` |
 | `release-please` | `contents: write`, `pull-requests: write` |
@@ -42,11 +42,13 @@ When you change what permissions a workflow needs, update the per-workflow
 ## Layout
 
 - `.github/workflows/*.yml` — reusable workflows (`workflow_call`): `ci-python`,
-  `ci-node`, `docker-publish`, `codeql`, `release-please`, `ghcr-cleanup`.
+  `ci-node`, `ci-go`, `docker-publish`, `codeql`, `release-please`, `ghcr-cleanup`.
 - `blueprints/python/` — files to **copy into** a new project (Makefile,
   `pre-commit.yaml`, `pyproject.toml`, README template). These are parallel copies of
   what the **[`python-backend-template`](https://github.com/s3ntin3l8/python-backend-template)**
   repo ships — **keep the two in sync** when you edit either.
+- `blueprints/go/` — files to **copy into** a new Go project (Makefile,
+  `pre-commit.yaml`). Keep these in sync with any future Go template repo.
 - `dependabot.yml`, `SECURITY.md`, `.github/PULL_REQUEST_TEMPLATE.md` — org defaults.
 
 ## Conventions
@@ -57,6 +59,10 @@ When you change what permissions a workflow needs, update the per-workflow
   (`pip install -e ".[dev]"`), else `requirements.txt` — so it works whether deps live
   in requirements files or pyproject. Don't hardcode repo-specific assumptions (e.g.
   the package name — use the `coverage-source` input, default `app`).
+  `ci-go` keeps itself layout-agnostic via a `pre-build-commands` escape hatch for
+  project-specific setup (most commonly stubbing `//go:embed` assets), and reads the
+  Go version from `go.mod` by default (override with `go-version-file` or
+  `go-version`).
 - **Detect npm scripts by exact key** (`npm pkg get scripts.X`), never by grepping
   `npm run` output (it matched substrings and ran the `npm init` `exit 1` stub).
 - **Action versions** are bumped by Dependabot (the `github-actions` ecosystem is

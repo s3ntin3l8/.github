@@ -1,0 +1,58 @@
+# Blueprint: Standard Go Pre-commit Config
+#
+# Run the pre-push `go-test` hook only if you keep your tests fast enough
+# (< 30s). Otherwise drop the `stages:` line and let it run on commit.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  - repo: local
+    hooks:
+      - id: go-fmt
+        name: gofmt
+        # `gofmt -l` prints files that need reformatting and exits 0; the
+        # outer command only fails when the output is non-empty.
+        entry: bash -c 'test -z "$(gofmt -l $(git ls-files "*.go"))"'
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: go-vet
+        name: go vet
+        entry: go vet ./...
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: go-mod-tidy
+        name: go mod tidy (check)
+        # `go mod tidy -diff` exits non-zero when go.mod / go.sum are
+        # out of sync with the source, but doesn't write any changes.
+        entry: bash -c 'go mod tidy -diff && git diff --exit-code go.mod go.sum'
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: go-test
+        name: go test (race + coverage)
+        entry: go test -race -coverprofile=coverage.txt -covermode=atomic -coverpkg=./... ./...
+        language: system
+        types: [go]
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: govulncheck
+        name: govulncheck
+        entry: bash -c 'GOBIN="$(git rev-parse --show-toplevel)/.bin" go install golang.org/x/vuln/cmd/govulncheck@latest && "$(git rev-parse --show-toplevel)/.bin/govulncheck" ./...'
+        language: system
+        types: [go]
+        pass_filenames: false
+        stages: [pre-push]
