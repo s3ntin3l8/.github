@@ -35,6 +35,8 @@ These are templates you can copy into your local projects to standardize your de
 ### [Python Blueprints](blueprints/python/)
 - [Makefile](blueprints/python/Makefile) - Standard Python dev environment setup.
 - [pre-commit.yaml](blueprints/python/pre-commit.yaml) - Standard Python linting and testing hooks.
+- [pyproject.toml](blueprints/python/pyproject.toml) - Pre-tuned Ruff and Mypy configuration.
+- [README.md.template](blueprints/python/README.md.template) - High-signal project README template.
 
 ## 🛡️ Templates
 - [dependabot.yml](dependabot.yml) - Recommended configuration for weekly dependency updates.
