@@ -49,13 +49,10 @@ jobs:
       - name: Run tests with coverage
         run: |
           if command -v pytest &> /dev/null; then
-            pytest --cov=app --cov-report=xml --cov-fail-under=${{ inputs.coverage-fail-under }}
+            pytest --cov=app --cov-report=xml --junitxml=junit.xml --cov-fail-under=${{ inputs.coverage-fail-under }}
           fi
       - name: Upload coverage reports to Codecov
-        if: env.HAS_CODECOV_TOKEN == 'true'
         uses: codecov/codecov-action@v5
-        env:
-          HAS_CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN != '' }}
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
