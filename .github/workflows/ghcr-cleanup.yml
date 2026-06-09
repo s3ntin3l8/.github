@@ -1,0 +1,30 @@
+name: Cleanup GHCR
+
+on:
+  workflow_call:
+    inputs:
+      package-name:
+        required: true
+        type: string
+      package-type:
+        required: false
+        type: string
+        default: 'container'
+      min-versions-to-keep:
+        required: false
+        type: number
+        default: 5
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Delete untagged images
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ inputs.package-name }}
+          package-type: ${{ inputs.package-type }}
+          delete-only-untagged-versions: 'true'
+          min-versions-to-keep: ${{ inputs.min-versions-to-keep }}

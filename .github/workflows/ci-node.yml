@@ -1,0 +1,33 @@
+name: Node.js CI
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        required: false
+        type: string
+        default: '22'
+      build-script:
+        required: false
+        type: string
+        default: 'build'
+
+jobs:
+  lint-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run checks
+        run: |
+          if npm run | grep -q "lint"; then npm run lint; fi
+          if npm run | grep -q "test"; then npm run test; fi
+      - name: Build
+        run: npm run ${{ inputs.build-script }}

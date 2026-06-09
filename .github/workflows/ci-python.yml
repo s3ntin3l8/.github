@@ -1,0 +1,61 @@
+name: Python CI
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        required: false
+        type: string
+        default: '3.12'
+      coverage-fail-under:
+        required: false
+        type: string
+        default: '70'
+    secrets:
+      CODECOV_TOKEN:
+        required: false
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+      - name: Lint and format check with ruff
+        run: |
+          if command -v ruff &> /dev/null; then ruff check . && ruff format --check .; fi
+      - name: Type check with mypy
+        run: |
+          if command -v mypy &> /dev/null; then mypy .; fi
+      - name: Detect secrets
+        run: |
+          if command -v detect-secrets-hook &> /dev/null && [ -f .secrets.baseline ]; then
+            git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+          fi
+      - name: Dependency security scan
+        run: |
+          if command -v pip-audit &> /dev/null && [ -f requirements.txt ]; then
+            pip-audit -r requirements.txt
+          fi
+      - name: Run tests with coverage
+        run: |
+          if command -v pytest &> /dev/null; then
+            pytest --cov=app --cov-report=xml --cov-fail-under=${{ inputs.coverage-fail-under }}
+          fi
+      - name: Upload coverage reports to Codecov
+        if: env.HAS_CODECOV_TOKEN == 'true'
+        uses: codecov/codecov-action@v5
+        env:
+          HAS_CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN != '' }}
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
