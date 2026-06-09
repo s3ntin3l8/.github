@@ -4,12 +4,40 @@ on:
   workflow_call:
     inputs:
       languages:
-        description: "Comma-separated list of languages to analyze (e.g., 'python,javascript-typescript')"
+        description: >-
+          Languages to analyze. Accepts a comma-separated list
+          ("python, javascript-typescript"), a JSON array
+          ('["python","javascript-typescript"]'), or the legacy pre-quoted
+          fragment ('"python", "javascript-typescript"').
         required: true
         type: string
 
 jobs:
+  # Normalize the languages input into a JSON array so the matrix below works
+  # whether the caller passes plain CSV, a JSON array, or the legacy pre-quoted
+  # fragment. Previously the matrix used fromJSON(format('[{0}]', inputs.languages)),
+  # which forced callers to pass the awkward, error-prone '"python", "js"' form.
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      languages: ${{ steps.parse.outputs.json }}
+    steps:
+      - name: Normalize languages input to a JSON array
+        id: parse
+        run: |
+          raw=$(printf '%s' '${{ inputs.languages }}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          case "$raw" in
+            \[*)  json="$raw" ;;                   # already a JSON array
+            *\"*) json="[$raw]" ;;                 # legacy pre-quoted fragment -> wrap
+            *)    json=$(printf '%s' "$raw" | tr ',' '\n' \
+                    | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+                    | grep -v '^$' | jq -R . | jq -cs .) ;;  # comma-separated -> array
+          esac
+          echo "languages -> $json"
+          echo "json=$json" >> "$GITHUB_OUTPUT"
+
   analyze:
+    needs: setup
     name: Analyze
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -21,7 +49,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: ${{ fromJSON(format('[{0}]', inputs.languages)) }}
+        language: ${{ fromJSON(needs.setup.outputs.languages) }}
 
     steps:
     - name: Checkout repository

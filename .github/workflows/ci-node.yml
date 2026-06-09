@@ -25,9 +25,33 @@ jobs:
           cache: 'npm'
       - name: Install dependencies
         run: npm ci
-      - name: Run checks
+      # Detect scripts with `npm pkg get` (exact key lookup) instead of grepping
+      # `npm run` output — the latter matched any script whose name OR body merely
+      # contained "test"/"lint", and happily ran the `npm init` default
+      # `"test": "...exit 1"` stub. `npm pkg get scripts.X` returns `{}` when absent.
+      - name: Lint
         run: |
-          if npm run | grep -q "lint"; then npm run lint; fi
-          if npm run | grep -q "test"; then npm run test; fi
+          lint=$(npm pkg get scripts.lint)
+          if [ "$lint" != "{}" ] && [ -n "$lint" ]; then
+            npm run lint
+          else
+            echo "No lint script defined; skipping."
+          fi
+      - name: Test
+        run: |
+          test_script=$(npm pkg get scripts.test)
+          if [ "$test_script" = "{}" ] || [ -z "$test_script" ]; then
+            echo "No test script defined; skipping."
+          elif printf '%s' "$test_script" | grep -q "no test specified"; then
+            echo "Default 'npm init' test stub detected; skipping."
+          else
+            npm run test
+          fi
       - name: Build
-        run: npm run ${{ inputs.build-script }}
+        run: |
+          build=$(npm pkg get "scripts.${{ inputs.build-script }}")
+          if [ "$build" != "{}" ] && [ -n "$build" ]; then
+            npm run "${{ inputs.build-script }}"
+          else
+            echo "No '${{ inputs.build-script }}' script defined; skipping build."
+          fi
