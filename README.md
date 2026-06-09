@@ -29,7 +29,7 @@ Runs `lint`/`test` npm scripts when present (the default `npm init` `exit 1` tes
 - **Expects:** a `package-lock.json` (uses `npm ci`).
 
 ### [CI-Go](.github/workflows/ci-go.yml)
-gofmt, `go vet`, `go build`, `go test -race` with coverage, Codecov upload, `govulncheck`.
+gofmt, `go vet`, `go build`, tests via `gotestsum` (race + coverage + JUnit), Codecov coverage **and** Test Analytics upload, `govulncheck`.
 - **Caller permissions:** none beyond the default `contents: read`.
 - **Secrets:** `CODECOV_TOKEN` (optional) — pass via `secrets: inherit`.
 - **Inputs:** `go-version` (default empty — override the version, e.g. `'1.23'`), `go-version-file` (default `go.mod` — derives the version when `go-version` is empty), `coverage-fail-under` (default `0` = disabled).
