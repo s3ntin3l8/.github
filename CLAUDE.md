@@ -38,15 +38,19 @@ When you change what permissions a workflow needs, update the per-workflow
 | `codeql` | `actions: read`, `contents: read`, `security-events: write` |
 | `release-please` | `contents: write`, `pull-requests: write` |
 | `ghcr-cleanup` | `packages: write` |
+| `dependency-review` | `contents: read` |
 
 ## Layout
 
 - `.github/workflows/*.yml` — reusable workflows (`workflow_call`): `ci-python`,
-  `ci-node`, `docker-publish`, `codeql`, `release-please`, `ghcr-cleanup`.
+  `ci-node`, `docker-publish`, `codeql`, `release-please`, `ghcr-cleanup`,
+  `dependency-review`.
 - `blueprints/python/` — files to **copy into** a new project (Makefile,
   `pre-commit.yaml`, `pyproject.toml`, README template). These are parallel copies of
   what the **[`python-backend-template`](https://github.com/s3ntin3l8/python-backend-template)**
   repo ships — **keep the two in sync** when you edit either.
+- `blueprints/node/` — files to **copy into** a new Node.js/TypeScript project
+  (Makefile, `pre-commit.yaml`).
 - `dependabot.yml`, `SECURITY.md`, `.github/PULL_REQUEST_TEMPLATE.md` — org defaults.
 
 ## Conventions
@@ -59,6 +63,10 @@ When you change what permissions a workflow needs, update the per-workflow
   the package name — use the `coverage-source` input, default `app`).
 - **Detect npm scripts by exact key** (`npm pkg get scripts.X`), never by grepping
   `npm run` output (it matched substrings and ran the `npm init` `exit 1` stub).
+  `ci-node` supports an explicit `test-script` input (default `test`) so callers can
+  opt into coverage by passing `test-script: 'test:coverage'`. When coverage is
+  generated (vitest v8 `coverage/coverage-summary.json`), it is uploaded to Codecov
+  and an optional `coverage-fail-under` threshold can be enforced.
 - **Action versions** are bumped by Dependabot (the `github-actions` ecosystem is
   configured) — don't hand-pin unless fixing a specific break.
 
@@ -69,7 +77,14 @@ jobs:
   test-python:
     uses: s3ntin3l8/.github/.github/workflows/ci-python.yml@main
     with:
-      coverage-source: 'my_pkg'   # omit if the package is named 'app'
+      coverage-source: 'my_pkg'   # omit if your package is named 'app'
+    secrets: inherit
+  test-node:
+    uses: s3ntin3l8/.github/.github/workflows/ci-node.yml@main
+    with:
+      node-version: '24'
+      test-script: 'test:coverage'     # opt into coverage + Codecov upload
+      coverage-fail-under: '80'         # optional: fail below 80%
     secrets: inherit
   build-docker:
     needs: [test-python]

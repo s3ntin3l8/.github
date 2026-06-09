@@ -25,8 +25,9 @@ ruff, mypy, pytest+coverage, Codecov (coverage **and** Test Analytics), pip-audi
 ### [CI-Node](.github/workflows/ci-node.yml)
 Runs `lint`/`test` npm scripts when present (the default `npm init` `exit 1` test stub is skipped), then builds.
 - **Caller permissions:** none beyond the default `contents: read`.
-- **Inputs:** `node-version`, `build-script` (default `build`).
-- **Expects:** a `package-lock.json` (uses `npm ci`).
+- **Secrets:** `CODECOV_TOKEN` (optional) — pass via `secrets: inherit`.
+- **Inputs:** `node-version` (default `22`), `build-script` (default `build`), **`test-script`** (default `test`; set to `test:coverage` to enable coverage upload and threshold enforcement), **`coverage-fail-under`** (default `0` = disabled; set e.g. `80` to require ≥80% line coverage).
+- **Expects:** a `package-lock.json` (uses `npm ci`). For coverage, a vitest v8 coverage setup that writes `coverage/coverage-summary.json`.
 
 ### [Docker-Publish](.github/workflows/docker-publish.yml)
 Multi-arch builds (amd64/arm64), GHCR push, and Cosign signing.
@@ -49,6 +50,11 @@ Deletes untagged container versions from GHCR on a schedule.
 - **Caller permissions (required):** `packages: write`.
 - **Inputs:** `package-name` (required), `package-type`, `min-versions-to-keep`.
 
+### [Dependency Review](.github/workflows/dependency-review.yml)
+Checks for vulnerable dependencies and license policy violations in PRs.
+- **Caller permissions:** `contents: read`.
+- **Inputs:** none.
+
 ### Minimal caller example
 ```yaml
 jobs:
@@ -56,6 +62,13 @@ jobs:
     uses: s3ntin3l8/.github/.github/workflows/ci-python.yml@main
     with:
       coverage-source: 'my_pkg'   # omit if your package is named 'app'
+    secrets: inherit
+  test-node:
+    uses: s3ntin3l8/.github/.github/workflows/ci-node.yml@main
+    with:
+      node-version: '24'
+      test-script: 'test:coverage'    # opt into coverage + Codecov upload
+      coverage-fail-under: '80'        # optional: fail below 80%
     secrets: inherit
   build-docker:
     needs: [test-python]
@@ -85,6 +98,10 @@ These are templates you can copy into your local projects to standardize your de
 - [pre-commit.yaml](blueprints/python/pre-commit.yaml) - Standard Python linting and testing hooks.
 - [pyproject.toml](blueprints/python/pyproject.toml) - Pre-tuned Ruff and Mypy configuration.
 - [README.md.template](blueprints/python/README.md.template) - High-signal project README template.
+
+### [Node Blueprints](blueprints/node/)
+- [Makefile](blueprints/node/Makefile) - Standard Node.js dev environment setup (install, dev, test, lint, typecheck, build, clean).
+- [pre-commit.yaml](blueprints/node/pre-commit.yaml) - Standard Node.js/TypeScript pre-commit hooks (eslint, typecheck, vitest).
 
 ## 🛡️ Templates
 - [dependabot.yml](dependabot.yml) - Recommended configuration for weekly dependency updates.
