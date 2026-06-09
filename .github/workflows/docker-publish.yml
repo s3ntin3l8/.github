@@ -88,7 +88,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Sign the published Docker image
-        if: ${{ (inputs.push-edge || inputs.push-release) && (secrets.REGISTRY_TOKEN != '' || secrets.GITHUB_TOKEN != '') }}
+        if: ${{ inputs.push-edge || inputs.push-release }}
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
           DIGEST: ${{ steps.build-and-push.outputs.digest }}
