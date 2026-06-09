@@ -65,8 +65,9 @@ When you change what permissions a workflow needs, update the per-workflow
   `npm run` output (it matched substrings and ran the `npm init` `exit 1` stub).
   `ci-node` supports an explicit `test-script` input (default `test`) so callers can
   opt into coverage by passing `test-script: 'test:coverage'`. When coverage is
-  generated (vitest v8 `coverage/coverage-summary.json`), it is uploaded to Codecov
-  and an optional `coverage-fail-under` threshold can be enforced.
+  generated as an istanbul `json-summary` report (`coverage/coverage-summary.json` —
+  vitest v8, jest, c8, …), it is uploaded to Codecov and an optional
+  `coverage-fail-under` threshold can be enforced.
 - **Action versions** are bumped by Dependabot (the `github-actions` ecosystem is
   configured) — don't hand-pin unless fixing a specific break.
 

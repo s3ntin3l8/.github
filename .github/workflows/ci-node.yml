@@ -24,7 +24,8 @@ on:
           Minimum coverage percent required. 0 (the default) disables the
           check so a new project doesn't fail out of the box. Bump once the
           project has meaningful coverage to track. Only effective when the
-          test script produces a coverage/coverage-summary.json (vitest v8).
+          test script writes an istanbul json-summary report
+          (coverage/coverage-summary.json — vitest v8, jest, c8, ...).
         required: false
         type: string
         default: '0'
@@ -36,6 +37,8 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - name: Set up Node.js
@@ -49,6 +52,7 @@ jobs:
       # `npm run` output — the latter matched any script whose name OR body merely
       # contained "test"/"lint", and happily ran the `npm init` default
       # `"test": "...exit 1"` stub. `npm pkg get scripts.X` returns `{}` when absent.
+      # Caller-controlled inputs are passed via `env:` (never inlined into run).
       - name: Lint
         run: |
           lint=$(npm pkg get scripts.lint)
@@ -58,36 +62,39 @@ jobs:
             echo "No lint script defined; skipping."
           fi
       - name: Test
+        env:
+          TEST_SCRIPT: ${{ inputs.test-script }}
         run: |
           # Use the caller-specified test script (defaults to 'test').
           # If the script doesn't exist, fall back gracefully.
-          script_key="${{ inputs.test-script }}"
-          script_val=$(npm pkg get "scripts.$script_key")
+          script_val=$(npm pkg get "scripts.$TEST_SCRIPT")
           if [ "$script_val" = "{}" ] || [ -z "$script_val" ]; then
-            echo "No '$script_key' script defined; skipping tests."
+            echo "No '$TEST_SCRIPT' script defined; skipping tests."
           elif printf '%s' "$script_val" | grep -q "no test specified"; then
             echo "Default 'npm init' test stub detected; skipping."
           else
-            npm run "$script_key"
+            npm run "$TEST_SCRIPT"
           fi
       - name: Enforce coverage threshold
         # coverage-fail-under=0 disables the check (the default) so a brand-new
-        # project doesn't fail out of the box. Only runs when a vitest v8
-        # coverage summary exists.
+        # project doesn't fail out of the box. Only runs when an istanbul
+        # json-summary report exists (vitest v8 / jest / c8).
         if: ${{ inputs.coverage-fail-under != '0' }}
+        env:
+          COVERAGE_FAIL_UNDER: ${{ inputs.coverage-fail-under }}
         run: |
           if [ ! -f coverage/coverage-summary.json ]; then
-            echo "::error::coverage-fail-under is set but coverage/coverage-summary.json was not found. Ensure your test script generates vitest v8 coverage."
+            echo "::error::coverage-fail-under is set but coverage/coverage-summary.json was not found. Ensure your test script writes an istanbul json-summary report."
             exit 1
           fi
           pct=$(jq '.total.lines.pct' coverage/coverage-summary.json)
           echo "Total line coverage: ${pct}%"
-          awk -v got="$pct" -v need="${{ inputs.coverage-fail-under }}" \
+          awk -v got="$pct" -v need="$COVERAGE_FAIL_UNDER" \
             'BEGIN { if (got+0 < need+0) { printf "::error::coverage %.1f%% below threshold %s%%\n", got, need; exit 1 } }'
       - name: Upload coverage to Codecov
-        # Upload if a coverage report was generated (vitest v8 writes to
-        # coverage/ by default). Not an error if absent — the project may not
-        # have coverage configured.
+        # Upload if a coverage report was generated (istanbul json-summary writes
+        # to coverage/). Not an error if absent — the project may not have
+        # coverage configured.
         if: ${{ hashFiles('coverage/coverage-summary.json') != '' }}
         uses: codecov/codecov-action@v5
         with:
@@ -96,10 +103,12 @@ jobs:
           flags: node
           fail_ci_if_error: false
       - name: Build
+        env:
+          BUILD_SCRIPT: ${{ inputs.build-script }}
         run: |
-          build=$(npm pkg get "scripts.${{ inputs.build-script }}")
+          build=$(npm pkg get "scripts.$BUILD_SCRIPT")
           if [ "$build" != "{}" ] && [ -n "$build" ]; then
-            npm run "${{ inputs.build-script }}"
+            npm run "$BUILD_SCRIPT"
           else
-            echo "No '${{ inputs.build-script }}' script defined; skipping build."
+            echo "No '$BUILD_SCRIPT' script defined; skipping build."
           fi
