@@ -28,5 +28,13 @@ The following files are automatically applied to all public repositories in this
 - [SECURITY.md](SECURITY.md) - Security disclosure policy.
 - [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) - Default PR checklist.
 
-## 🛠️ Templates
+## 🛠️ Blueprints
+
+These are templates you can copy into your local projects to standardize your development environment.
+
+### [Python Blueprints](blueprints/python/)
+- [Makefile](blueprints/python/Makefile) - Standard Python dev environment setup.
+- [pre-commit.yaml](blueprints/python/pre-commit.yaml) - Standard Python linting and testing hooks.
+
+## 🛡️ Templates
 - [dependabot.yml](dependabot.yml) - Recommended configuration for weekly dependency updates.
