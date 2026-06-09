@@ -8,16 +8,19 @@ PIP := $(VENV)/bin/pip
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-install-hooks: ## Install pre-commit hooks
-	$(VENV)/bin/pip install pre-commit
-	$(VENV)/bin/pre-commit install
-	$(VENV)/bin/pre-commit install --hook-type pre-push
-
-install: install-hooks ## Set up venv and install dependencies
+install: ## Set up venv, install dependencies, then hooks
 	python3 -m venv $(VENV)
 	$(PIP) install --upgrade pip
 	[ -f requirements-dev.txt ] && $(PIP) install -r requirements-dev.txt || true
 	[ -f requirements.txt ] && $(PIP) install -r requirements.txt || true
+	[ -f pyproject.toml ] && $(PIP) install -e ".[dev]" || true
+	$(MAKE) install-hooks
+
+# Assumes the venv already exists (created by `make install`). Safe to run on its own.
+install-hooks: ## Install pre-commit hooks
+	$(VENV)/bin/pip install pre-commit
+	$(VENV)/bin/pre-commit install
+	$(VENV)/bin/pre-commit install --hook-type pre-push
 
 test: ## Run tests
 	$(VENV)/bin/pytest
