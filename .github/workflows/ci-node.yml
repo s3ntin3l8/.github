@@ -11,11 +11,34 @@ on:
         required: false
         type: string
         default: 'build'
+      test-script:
+        description: >-
+          npm script to run for tests. Set to 'test:coverage' (or any script
+          that generates a coverage report) to enable coverage upload and
+          optional threshold enforcement.
+        required: false
+        type: string
+        default: 'test'
+      coverage-fail-under:
+        description: >-
+          Minimum coverage percent required. 0 (the default) disables the
+          check so a new project doesn't fail out of the box. Bump once the
+          project has meaningful coverage to track. Only effective when the
+          test script writes an istanbul json-summary report
+          (coverage/coverage-summary.json — vitest v8, jest, c8, ...).
+        required: false
+        type: string
+        default: '0'
+    secrets:
+      CODECOV_TOKEN:
+        required: false
 
 jobs:
-  lint-and-build:
+  lint-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - name: Set up Node.js
@@ -29,6 +52,7 @@ jobs:
       # `npm run` output — the latter matched any script whose name OR body merely
       # contained "test"/"lint", and happily ran the `npm init` default
       # `"test": "...exit 1"` stub. `npm pkg get scripts.X` returns `{}` when absent.
+      # Caller-controlled inputs are passed via `env:` (never inlined into run).
       - name: Lint
         run: |
           lint=$(npm pkg get scripts.lint)
@@ -38,20 +62,63 @@ jobs:
             echo "No lint script defined; skipping."
           fi
       - name: Test
+        env:
+          TEST_SCRIPT: ${{ inputs.test-script }}
         run: |
-          test_script=$(npm pkg get scripts.test)
-          if [ "$test_script" = "{}" ] || [ -z "$test_script" ]; then
-            echo "No test script defined; skipping."
-          elif printf '%s' "$test_script" | grep -q "no test specified"; then
+          # Use the caller-specified test script (defaults to 'test').
+          # If the script doesn't exist, fall back gracefully.
+          script_val=$(npm pkg get "scripts.$TEST_SCRIPT")
+          if [ "$script_val" = "{}" ] || [ -z "$script_val" ]; then
+            echo "No '$TEST_SCRIPT' script defined; skipping tests."
+          elif printf '%s' "$script_val" | grep -q "no test specified"; then
             echo "Default 'npm init' test stub detected; skipping."
           else
-            npm run test
+            npm run "$TEST_SCRIPT"
           fi
-      - name: Build
+      - name: Enforce coverage threshold
+        # coverage-fail-under=0 disables the check (the default) so a brand-new
+        # project doesn't fail out of the box. Only runs when an istanbul
+        # json-summary report exists (vitest v8 / jest / c8).
+        if: ${{ inputs.coverage-fail-under != '0' }}
+        env:
+          COVERAGE_FAIL_UNDER: ${{ inputs.coverage-fail-under }}
         run: |
-          build=$(npm pkg get "scripts.${{ inputs.build-script }}")
+          if [ ! -f coverage/coverage-summary.json ]; then
+            echo "::error::coverage-fail-under is set but coverage/coverage-summary.json was not found. Ensure your test script writes an istanbul json-summary report."
+            exit 1
+          fi
+          pct=$(jq '.total.lines.pct' coverage/coverage-summary.json)
+          echo "Total line coverage: ${pct}%"
+          awk -v got="$pct" -v need="$COVERAGE_FAIL_UNDER" \
+            'BEGIN { if (got+0 < need+0) { printf "::error::coverage %.1f%% below threshold %s%%\n", got, need; exit 1 } }'
+      - name: Upload coverage to Codecov
+        # Upload if a coverage report was generated (istanbul json-summary writes
+        # to coverage/). Not an error if absent — the project may not have
+        # coverage configured.
+        if: ${{ hashFiles('coverage/coverage-summary.json') != '' }}
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: ./coverage
+          flags: node
+          fail_ci_if_error: false
+      - name: Upload test results to Codecov (Test Analytics)
+        # Enabled when the test runner emits JUnit XML — configure it in your
+        # project (vitest: --reporter=junit --outputFile=./test-results/junit.xml;
+        # jest: jest-junit). Uploaded even on test failure (the point of Analytics).
+        if: ${{ !cancelled() && (hashFiles('test-results/**/*.xml') != '' || hashFiles('junit.xml') != '') }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: node
+          fail_ci_if_error: false
+      - name: Build
+        env:
+          BUILD_SCRIPT: ${{ inputs.build-script }}
+        run: |
+          build=$(npm pkg get "scripts.$BUILD_SCRIPT")
           if [ "$build" != "{}" ] && [ -n "$build" ]; then
-            npm run "${{ inputs.build-script }}"
+            npm run "$BUILD_SCRIPT"
           else
-            echo "No '${{ inputs.build-script }}' script defined; skipping build."
+            echo "No '$BUILD_SCRIPT' script defined; skipping build."
           fi
