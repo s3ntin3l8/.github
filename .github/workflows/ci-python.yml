@@ -80,7 +80,9 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
       - name: Upload test results to Codecov (Test Analytics)
-        if: ${{ !cancelled() }}   # upload even when tests FAIL — that is the point of Test Analytics
+        # Upload even when tests FAIL — that is the point of Test Analytics — but
+        # skip cleanly when there is no junit.xml (e.g. a lint-only repo with no pytest).
+        if: ${{ !cancelled() && hashFiles('junit.xml') != '' }}
         uses: codecov/test-results-action@v1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
