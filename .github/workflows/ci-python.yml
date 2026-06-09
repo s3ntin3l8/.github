@@ -70,9 +70,12 @@ jobs:
             fi
           fi
       - name: Run tests with coverage
+        env:
+          COVERAGE_SOURCE: ${{ inputs.coverage-source }}
+          COVERAGE_FAIL_UNDER: ${{ inputs.coverage-fail-under }}
         run: |
           if command -v pytest &> /dev/null; then
-            pytest --cov=${{ inputs.coverage-source }} --cov-report=xml --junitxml=junit.xml --cov-fail-under=${{ inputs.coverage-fail-under }}
+            pytest --cov="$COVERAGE_SOURCE" --cov-report=xml --junitxml=junit.xml --cov-fail-under="$COVERAGE_FAIL_UNDER"
           fi
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
