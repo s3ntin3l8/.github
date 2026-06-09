@@ -1,2 +1,32 @@
-# .github
-Centralized GitHub workflows and templates
+# s3ntin3l8/.github
+
+This repository contains the "Platinum Standard" centralized workflows, security policies, and repository templates for my projects.
+
+## 🚀 Reusable Workflows
+
+These building blocks allow any repository to implement a robust CI/CD pipeline with just a few lines of YAML.
+
+### [CI-Python](.github/workflows/ci-python.yml)
+Handles ruff, mypy, pytest, codecov, and secret scanning for Python projects.
+
+### [CI-Node](.github/workflows/ci-node.yml)
+Handles linting and building for Node.js / React projects.
+
+### [Docker-Publish](.github/workflows/docker-publish.yml)
+Handles multi-arch builds (amd64/arm64), GHCR pushing, and Cosign signing.
+
+### [CodeQL](.github/workflows/codeql.yml)
+Advanced semantic security scanning.
+
+### [Release-Please](.github/workflows/release-please.yml)
+Automated versioning and changelogs.
+
+---
+
+## 🛡️ Global Health Files
+The following files are automatically applied to all public repositories in this account:
+- [SECURITY.md](SECURITY.md) - Security disclosure policy.
+- [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) - Default PR checklist.
+
+## 🛠️ Templates
+- [dependabot.yml](dependabot.yml) - Recommended configuration for weekly dependency updates.
