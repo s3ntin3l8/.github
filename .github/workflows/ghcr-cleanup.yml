@@ -1,5 +1,16 @@
 name: Cleanup GHCR
 
+# Manifest-aware GHCR pruning, reusable across repos.
+#
+# Container images are often multi-arch (e.g. linux/amd64,arm64), so each tag is
+# a manifest list whose per-arch and buildx attestation child manifests show up
+# as *untagged* versions — referenced, not garbage. A naive untagged-delete
+# (actions/delete-package-versions with delete-only-untagged) can't tell a live
+# child manifest from a dangling one: it leaves a floor of untagged entries it
+# can never clear and risks clipping a child of an older tag, breaking it on one
+# architecture. This action parses the manifest lists, deletes only genuinely
+# dangling digests, and validates that every surviving tag still resolves.
+
 on:
   workflow_call:
     inputs:
@@ -10,10 +21,18 @@ on:
         required: false
         type: string
         default: 'container'
+      dry-run:
+        description: 'Simulate — log what would be deleted without deleting'
+        required: false
+        type: boolean
+        default: false
+      # Back-compat: callers used to pass this to actions/delete-package-versions.
+      # The manifest-aware action keeps all referenced children automatically, so
+      # this now maps to "keep N most-recent *dangling* untagged digests".
       min-versions-to-keep:
         required: false
         type: number
-        default: 5
+        default: 0
 
 jobs:
   cleanup:
@@ -21,10 +40,16 @@ jobs:
     permissions:
       packages: write
     steps:
-      - name: Delete untagged images
-        uses: actions/delete-package-versions@v5
+      # dataaxiom/ghcr-cleanup-action v1.2.2 (pinned — the action can delete
+      # registry images; Dependabot bumps the comment + SHA together).
+      - name: Prune dangling GHCR images
+        uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f
         with:
-          package-name: ${{ inputs.package-name }}
-          package-type: ${{ inputs.package-type }}
-          delete-only-untagged-versions: 'true'
-          min-versions-to-keep: ${{ inputs.min-versions-to-keep }}
+          package: ${{ inputs.package-name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          delete-untagged: true
+          delete-partial-images: true
+          delete-ghost-images: true
+          keep-n-untagged: ${{ inputs.min-versions-to-keep }}
+          validate: true
+          dry-run: ${{ inputs.dry-run }}
