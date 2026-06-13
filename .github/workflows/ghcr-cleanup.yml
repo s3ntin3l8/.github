@@ -26,9 +26,11 @@ on:
         required: false
         type: boolean
         default: false
-      # Back-compat: callers used to pass this to actions/delete-package-versions.
-      # The manifest-aware action keeps all referenced children automatically, so
-      # this now maps to "keep N most-recent *dangling* untagged digests".
+      # Accepted for back-compat with existing callers; no longer wired. The
+      # manifest-aware action keeps every referenced child automatically, so the
+      # old "keep N untagged" workaround (for the non-aware delete action) is
+      # unnecessary — and `keep-n-untagged` is mutually exclusive with
+      # `delete-untagged`, which we use to clear all genuinely-dangling digests.
       min-versions-to-keep:
         required: false
         type: number
@@ -50,6 +52,5 @@ jobs:
           delete-untagged: true
           delete-partial-images: true
           delete-ghost-images: true
-          keep-n-untagged: ${{ inputs.min-versions-to-keep }}
           validate: true
           dry-run: ${{ inputs.dry-run }}
