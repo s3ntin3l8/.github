@@ -46,10 +46,10 @@ jobs:
           ref: ${{ inputs.release-tag || github.ref }}
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Install cosign
         if: ${{ inputs.push-edge || inputs.push-release }}
@@ -57,7 +57,7 @@ jobs:
 
       - name: Log in to the Container registry
         if: ${{ inputs.push-edge || inputs.push-release }}
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.REGISTRY_USERNAME || github.actor }}
@@ -65,7 +65,7 @@ jobs:
 
       - name: Extract metadata for Docker
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ inputs.image-name }}
           tags: |
@@ -77,7 +77,7 @@ jobs:
 
       - name: Build and push Docker image
         id: build-and-push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ inputs.platforms }}
