@@ -78,7 +78,7 @@ jobs:
             pytest --cov="$COVERAGE_SOURCE" --cov-report=xml --junitxml=junit.xml --cov-fail-under="$COVERAGE_FAIL_UNDER"
           fi
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false

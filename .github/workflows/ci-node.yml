@@ -179,7 +179,7 @@ jobs:
         # to coverage/). Not an error if absent — the project may not have
         # coverage configured.
         if: ${{ steps.probe.outputs.has_coverage == 'true' }}
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           directory: ${{ format('{0}coverage', env.WD_PREFIX) }}
