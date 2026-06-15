@@ -11,6 +11,16 @@ on:
           fragment ('"python", "javascript-typescript"').
         required: true
         type: string
+      queries:
+        description: >-
+          CodeQL query suites to run (passed straight to codeql-action/init).
+          Defaults to the maximal "security-extended,security-and-quality"
+          suite. Callers with a large codebase can pass a lighter suite
+          (e.g. "security-extended") to cut analysis time while keeping full
+          security coverage.
+        required: false
+        type: string
+        default: security-extended,security-and-quality
 
 jobs:
   # Normalize the languages input into a JSON array so the matrix below works
@@ -61,7 +71,7 @@ jobs:
       uses: github/codeql-action/init@v3
       with:
         languages: ${{ matrix.language }}
-        queries: security-extended,security-and-quality
+        queries: ${{ inputs.queries }}
 
     - name: Autobuild
       uses: github/codeql-action/autobuild@v3

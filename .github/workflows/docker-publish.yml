@@ -30,40 +30,151 @@ on:
 env:
   REGISTRY: ghcr.io
 
+# Build each architecture natively (no QEMU emulation) on its own runner, push each
+# as a by-digest image, then assemble a multi-arch manifest list in a final merge job.
+# This replaces the previous single-job buildx build, where the arm64 leg ran under
+# QEMU emulation and dominated the wall-clock. Each platform from `platforms` is mapped
+# to a native GitHub-hosted runner; the input surface is unchanged so callers need no edits.
 jobs:
-  build-and-push:
+  # Turn the `platforms` CSV into a build matrix of {platform, runner}, mapping each
+  # architecture to a native runner. Unknown platforms fall back to an amd64 runner
+  # (with QEMU set up in the build job) so exotic targets still build, just slower.
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      push: ${{ steps.flags.outputs.push }}
+    steps:
+      - name: Resolve push flag
+        id: flags
+        run: echo "push=${{ inputs.push-edge || inputs.push-release }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build platform -> runner matrix
+        id: matrix
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          include='[]'
+          IFS=',' read -ra parts <<< "$PLATFORMS"
+          for p in "${parts[@]}"; do
+            p="$(printf '%s' "$p" | xargs)"   # trim whitespace
+            [ -z "$p" ] && continue
+            case "$p" in
+              linux/amd64) runner='ubuntu-24.04' ;;
+              linux/arm64) runner='ubuntu-24.04-arm' ;;
+              *)           runner='ubuntu-24.04' ;;   # fallback: emulate on amd64
+            esac
+            include=$(jq -c --arg p "$p" --arg r "$runner" '. += [{"platform":$p,"runner":$r}]' <<< "$include")
+          done
+          echo "platforms -> $include"
+          echo "matrix={\"include\":$include}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:
       contents: read
       packages: write
       id-token: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
 
     steps:
+      - name: Architecture slug
+        id: arch
+        run: echo "slug=$(printf '%s' '${{ matrix.platform }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
           ref: ${{ inputs.release-tag || github.ref }}
 
+      # Only needed for the fallback case (a non-amd64 platform pinned to an amd64 runner).
+      # Native amd64/arm64 builds skip this entirely.
       - name: Set up QEMU
+        if: ${{ matrix.runner == 'ubuntu-24.04' && matrix.platform != 'linux/amd64' }}
         uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Install cosign
-        if: ${{ inputs.push-edge || inputs.push-release }}
-        uses: sigstore/cosign-installer@v3.5.0
-
       - name: Log in to the Container registry
-        if: ${{ inputs.push-edge || inputs.push-release }}
+        if: ${{ needs.prepare.outputs.push == 'true' }}
         uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.REGISTRY_USERNAME || github.actor }}
           password: ${{ secrets.REGISTRY_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata for Docker
+      - name: Extract metadata (labels)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ inputs.image-name }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ steps.arch.outputs.slug }}
+          cache-to: type=gha,mode=max,scope=${{ steps.arch.outputs.slug }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ inputs.image-name }},push-by-digest=true,name-canonical=true,push=${{ needs.prepare.outputs.push }}
+
+      - name: Export digest
+        if: ${{ needs.prepare.outputs.push == 'true' }}
+        run: |
+          mkdir -p /tmp/digests
+          digest='${{ steps.build.outputs.digest }}'
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: ${{ needs.prepare.outputs.push == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ steps.arch.outputs.slug }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assemble the per-arch digests into a single multi-arch manifest list, tag it,
+  # and sign it. Skipped entirely for non-publishing (build-only) invocations.
+  merge:
+    needs: [prepare, build]
+    if: ${{ needs.prepare.outputs.push == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.5.0
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME || github.actor }}
+          password: ${{ secrets.REGISTRY_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags)
         id: meta
         uses: docker/metadata-action@v6
         with:
@@ -75,21 +186,18 @@ jobs:
             type=raw,value=latest,enable=${{ inputs.push-release }}
             type=sha,enable=${{ !inputs.push-release }}
 
-      - name: Build and push Docker image
-        id: build-and-push
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: ${{ inputs.platforms }}
-          push: ${{ inputs.push-edge || inputs.push-release }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create and push manifest list
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ inputs.image-name }}@sha256:%s ' *)
 
       - name: Sign the published Docker image
-        if: ${{ inputs.push-edge || inputs.push-release }}
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
-          DIGEST: ${{ steps.build-and-push.outputs.digest }}
-        run: echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          DIGEST=$(docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ inputs.image-name }}:${VERSION}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
