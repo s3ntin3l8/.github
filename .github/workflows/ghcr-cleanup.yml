@@ -35,6 +35,16 @@ on:
         required: false
         type: number
         default: 0
+      # docker-publish.yml stamps a unique `sha-<shortsha>` tag on every edge build
+      # (type=sha in its metadata-action block), separate from the moving `edge` tag.
+      # Those are genuinely tagged, not untagged, so the untagged-pruning step below
+      # never touches them — left alone they accumulate one image per push to main
+      # forever. Keep only the newest N as a rollback/debug window.
+      keep-n-sha-tagged:
+        description: 'How many sha-<shortsha> build tags to retain, newest first'
+        required: false
+        type: number
+        default: 10
 
 jobs:
   cleanup:
@@ -52,5 +62,17 @@ jobs:
           delete-untagged: true
           delete-partial-images: true
           delete-ghost-images: true
+          validate: true
+          dry-run: ${{ inputs.dry-run }}
+
+      # Scoped to the `sha-*` pattern via delete-tags, so `edge`/semver/`latest` tags
+      # are never even considered — only stale per-commit build tags are pruned.
+      - name: Prune old sha-tagged build images
+        uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f
+        with:
+          package: ${{ inputs.package-name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          delete-tags: 'sha-*'
+          keep-n-tagged: ${{ inputs.keep-n-sha-tagged }}
           validate: true
           dry-run: ${{ inputs.dry-run }}
