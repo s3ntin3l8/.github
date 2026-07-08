@@ -305,8 +305,39 @@ jobs:
           node-version: ${{ inputs.node-version }}
           cache: 'npm'
           cache-dependency-path: ${{ inputs.cache-dependency-path }}
+      - name: Cache Turbo
+        if: ${{ inputs.turbo-cache }}
+        uses: actions/cache@v4
+        with:
+          path: ${{ inputs.working-directory == '.' && '' || format('{0}/', inputs.working-directory) }}**/.turbo
+          key: turbo-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-
       - name: Install dependencies
         run: npm ci
+      # lint-and-test's Lint/Typecheck steps get workspace dependencies built for
+      # free via Turbo's `dependsOn: ["^build"]` graph (see turbo.json), since Test
+      # used to run later in that same job/filesystem. This job never runs Lint, so
+      # it needs its own explicit build — callers whose tests resolve workspace
+      # packages via each package's *built* output rather than source (e.g. a web
+      # app with no src-alias override) fail import resolution without this.
+      - name: Build dependencies
+        env:
+          BUILD_SCRIPT: ${{ inputs.build-script }}
+          BUILD_ENV: ${{ inputs.build-env }}
+        run: |
+          build=$(npm pkg get "scripts.$BUILD_SCRIPT")
+          if [ "$build" != "{}" ] && [ -n "$build" ]; then
+            if [ -n "$BUILD_ENV" ]; then
+              while IFS= read -r line; do
+                case "$line" in ''|'#'*) continue ;; esac
+                export "$line"
+              done <<< "$BUILD_ENV"
+            fi
+            npm run "$BUILD_SCRIPT"
+          else
+            echo "No '$BUILD_SCRIPT' script defined; skipping build."
+          fi
       - name: Test (shard ${{ matrix.shard }}/${{ inputs.test-shards }})
         env:
           TEST_SCRIPT: ${{ inputs.test-script }}
