@@ -84,15 +84,15 @@ on:
         description: >-
           Cache Turborepo's local cache directories (`**/.turbo` under
           working-directory) across CI runs, keyed by commit SHA with an
-          OS-scoped restore-key fallback. Safe to enable even when Turbo
-          isn't used — `actions/cache` no-ops on a path that doesn't exist.
-          Turbo's own hashing is content-based, so a stale restored cache
-          cannot produce a wrong build/lint/typecheck result; a changed input
-          simply misses and reruns. Off by default since most callers of this
-          workflow aren't Turborepo monorepos.
+          OS-scoped restore-key fallback. On by default — safe even for
+          non-Turborepo callers (`actions/cache` no-ops on a path that
+          doesn't exist, just a cheap cache-miss check) and can't produce a
+          stale/wrong result for Turborepo callers either, since Turbo's own
+          hashing is content-based: a changed input simply misses and
+          reruns. Set to `false` to opt out.
         required: false
         type: boolean
-        default: false
+        default: true
     secrets:
       CODECOV_TOKEN:
         required: false
