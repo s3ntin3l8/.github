@@ -10,7 +10,7 @@ on:
       working-directory:
         description: >-
           Directory containing package.json (relative to the repo root). All
-          shell steps run here; `actions/setup-node` and Codecov paths are
+          shell steps run there; `actions/setup-node` and Codecov paths are
           computed relative to the repo root. Default '.' assumes a
           top-level package.json.
         required: false
@@ -61,31 +61,89 @@ on:
         required: false
         type: string
         default: '0'
+      test-shards:
+        description: >-
+          Split the test step across N parallel jobs (vitest/jest `--shard`
+          syntax, appended to the test script via `npm run <script> --
+          --shard=i/N`). 1 (the default) is a NO-OP: the original single
+          `lint-and-test` job runs unchanged, so every existing caller is
+          unaffected unless it explicitly opts in. When > 1, tests run in a
+          `test-shard` matrix + a `test-merge` job that combines per-shard
+          coverage and enforces `coverage-fail-under` once over the union —
+          per-shard coverage is NEVER gated individually. Sharded coverage
+          merging requires the test script's coverage reporter to include
+          istanbul's `json` reporter (which writes `coverage-final.json`) in
+          addition to `json-summary` — vitest: add `"json"` to
+          `coverage.reporter`; jest: add `"json"` to `coverageReporters`.
+          Requires an npm script that accepts pass-through CLI args (true for
+          `vitest run ...` and `jest ...`).
+        required: false
+        type: string
+        default: '1'
+      turbo-cache:
+        description: >-
+          Cache Turborepo's local cache directories (`**/.turbo` under
+          working-directory) across CI runs, keyed by commit SHA with an
+          OS-scoped restore-key fallback. Safe to enable even when Turbo
+          isn't used — `actions/cache` no-ops on a path that doesn't exist.
+          Turbo's own hashing is content-based, so a stale restored cache
+          cannot produce a wrong build/lint/typecheck result; a changed input
+          simply misses and reruns. Off by default since most callers of this
+          workflow aren't Turborepo monorepos.
+        required: false
+        type: boolean
+        default: false
     secrets:
       CODECOV_TOKEN:
         required: false
 
 jobs:
+  # Computes the shard matrix as a JSON array (e.g. test-shards=3 -> [1,2,3]) so
+  # `test-shard` below can consume it via `strategy.matrix.shard`. Only runs when
+  # sharding is actually requested — kept out of `lint-and-test` so that job's step
+  # list stays byte-for-byte identical to before this input existed.
+  shard-plan:
+    if: ${{ fromJSON(inputs.test-shards) > 1 }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - id: plan
+        env:
+          TEST_SHARDS: ${{ inputs.test-shards }}
+        run: |
+          shards=$(jq -nc --argjson n "$TEST_SHARDS" '[range(1; $n + 1)]')
+          echo "shards=$shards" >> "$GITHUB_OUTPUT"
+
   lint-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
-    # `defaults: run` applies only to `run:` steps; `actions/setup-node` and
-    # the Codecov `uses:` steps run with the workspace root and need
+    # `defaults: run` applies only to `run:` steps; `actions/setup-node`, the Codecov
+    # `uses:` steps, and `actions/cache` run with the workspace root and need
     # explicitly-constructed paths (see WD_PREFIX env var below).
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
     # WD_PREFIX is either '' (working-directory == '.') or 'subdir/' (working-directory == 'subdir').
-    # All workspace-root-relative paths (codecov `directory:`, etc.) are
-    # constructed from this so they work whether the package lives at the
-    # repo root or in a subdirectory. The shell-based coverage/test-results
-    # checks below are NOT built from this — they use plain relative paths
-    # inside the `defaults: run: working-directory` and therefore naturally
-    # resolve correctly without manual prefixing.
+    # All workspace-root-relative paths (codecov `directory:`, actions/cache `path:`,
+    # etc.) are constructed from this so they work whether the package lives at the
+    # repo root or in a subdirectory. The shell-based coverage/test-results checks
+    # below are NOT built from this — they use plain relative paths inside the
+    # `defaults: run: working-directory` and therefore naturally resolve correctly
+    # without manual prefixing.
+    # SHARDED-here is true when this run's Test/coverage steps are handled by the
+    # separate test-shard + test-merge jobs instead of inline below — every step from
+    # "Test" through "Upload test results to Codecov" is gated on it being false, so
+    # with the default test-shards=1 this job's step list and behavior are unchanged
+    # from before test-shards existed.
     env:
       WD_PREFIX: ${{ inputs.working-directory == '.' && '' || format('{0}/', inputs.working-directory) }}
+      SHARDED: ${{ fromJSON(inputs.test-shards) > 1 }}
     steps:
       - uses: actions/checkout@v6
       - name: Set up Node.js
@@ -94,6 +152,14 @@ jobs:
           node-version: ${{ inputs.node-version }}
           cache: 'npm'
           cache-dependency-path: ${{ inputs.cache-dependency-path }}
+      - name: Cache Turbo
+        if: ${{ inputs.turbo-cache }}
+        uses: actions/cache@v4
+        with:
+          path: ${{ format('{0}**/.turbo', env.WD_PREFIX) }}
+          key: turbo-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-
       - name: Install dependencies
         run: npm ci
       # Detect scripts with `npm pkg get` (exact key lookup) instead of grepping
@@ -121,6 +187,7 @@ jobs:
             npm run "$TYPECHECK_SCRIPT"
           fi
       - name: Test
+        if: ${{ env.SHARDED == 'false' }}
         env:
           TEST_SCRIPT: ${{ inputs.test-script }}
         run: |
@@ -142,7 +209,7 @@ jobs:
         # `always()` so the outputs are still set when the test step above
         # fails — the coverage-upload step can then skip gracefully instead
         # of the workflow bailing on a missing-output reference.
-        if: ${{ always() }}
+        if: ${{ always() && env.SHARDED == 'false' }}
         id: probe
         run: |
           if [ -f coverage/coverage-summary.json ]; then
@@ -159,7 +226,7 @@ jobs:
         # coverage-fail-under=0 disables the check (the default) so a brand-new
         # project doesn't fail out of the box. Only runs when an istanbul
         # json-summary report exists (vitest v8 / jest / c8).
-        if: ${{ inputs.coverage-fail-under != '0' && steps.probe.outputs.has_coverage == 'true' }}
+        if: ${{ env.SHARDED == 'false' && inputs.coverage-fail-under != '0' && steps.probe.outputs.has_coverage == 'true' }}
         env:
           COVERAGE_FAIL_UNDER: ${{ inputs.coverage-fail-under }}
         run: |
@@ -168,7 +235,7 @@ jobs:
           awk -v got="$pct" -v need="$COVERAGE_FAIL_UNDER" \
             'BEGIN { if (got+0 < need+0) { printf "::error::coverage %.1f%% below threshold %s%%\n", got, need; exit 1 } }'
       - name: Enforce coverage threshold (missing report)
-        if: ${{ inputs.coverage-fail-under != '0' && steps.probe.outputs.has_coverage == 'false' }}
+        if: ${{ env.SHARDED == 'false' && inputs.coverage-fail-under != '0' && steps.probe.outputs.has_coverage == 'false' }}
         env:
           COVERAGE_FAIL_UNDER: ${{ inputs.coverage-fail-under }}
         run: |
@@ -178,7 +245,7 @@ jobs:
         # Upload if a coverage report was generated (istanbul json-summary writes
         # to coverage/). Not an error if absent — the project may not have
         # coverage configured.
-        if: ${{ steps.probe.outputs.has_coverage == 'true' }}
+        if: ${{ env.SHARDED == 'false' && steps.probe.outputs.has_coverage == 'true' }}
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -189,7 +256,7 @@ jobs:
         # Enabled when the test runner emits JUnit XML — configure it in your
         # project (vitest: --reporter=junit --outputFile=./test-results/junit.xml;
         # jest: jest-junit). Uploaded even on test failure (the point of Analytics).
-        if: ${{ !cancelled() && steps.probe.outputs.has_junit == 'true' }}
+        if: ${{ env.SHARDED == 'false' && !cancelled() && steps.probe.outputs.has_junit == 'true' }}
         uses: codecov/test-results-action@v1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -213,3 +280,133 @@ jobs:
           else
             echo "No '$BUILD_SCRIPT' script defined; skipping build."
           fi
+
+  # Only runs when test-shards > 1 (see shard-plan). Runs in parallel with
+  # lint-and-test (no `needs:` between them) — lint/typecheck/build no longer block
+  # on, or get blocked by, the sharded test matrix.
+  test-shard:
+    needs: shard-plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.shard-plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+          cache-dependency-path: ${{ inputs.cache-dependency-path }}
+      - name: Install dependencies
+        run: npm ci
+      - name: Test (shard ${{ matrix.shard }}/${{ inputs.test-shards }})
+        env:
+          TEST_SCRIPT: ${{ inputs.test-script }}
+          SHARD: ${{ matrix.shard }}
+          TOTAL_SHARDS: ${{ inputs.test-shards }}
+        run: |
+          script_val=$(npm pkg get "scripts.$TEST_SCRIPT")
+          if [ "$script_val" = "{}" ] || [ -z "$script_val" ]; then
+            echo "::error::No '$TEST_SCRIPT' script defined; test-shards > 1 requires one."
+            exit 1
+          fi
+          npm run "$TEST_SCRIPT" -- --shard="${SHARD}/${TOTAL_SHARDS}"
+      - name: Upload shard coverage
+        # coverage-final.json is istanbul's raw per-file hit-map (NOT the
+        # coverage-summary.json percentages) — test-merge needs the hit-maps to
+        # compute an accurate union, since averaging per-shard percentages would be
+        # wrong (shards cover disjoint file sets, not equal-sized samples of the same
+        # files). Requires the caller's coverage reporter list to include "json".
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-shard-${{ matrix.shard }}
+          path: |
+            ${{ inputs.working-directory }}/coverage/coverage-final.json
+            ${{ inputs.working-directory }}/junit.xml
+            ${{ inputs.working-directory }}/test-results/*.xml
+          if-no-files-found: ignore
+          retention-days: 1
+
+  # Only runs when test-shards > 1. Merges every shard's raw coverage hit-map into
+  # one accurate report and enforces coverage-fail-under exactly once, over the
+  # union — never per-shard (a per-shard gate would be meaningless, since no single
+  # shard sees the whole codebase).
+  test-merge:
+    needs: test-shard
+    if: ${{ always() && fromJSON(inputs.test-shards) > 1 }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    env:
+      WD_PREFIX: ${{ inputs.working-directory == '.' && '' || format('{0}/', inputs.working-directory) }}
+    steps:
+      - name: Fail if any shard failed
+        # `needs: test-shard` without this check would leave test-merge simply not
+        # running (shown as "skipped") when a shard fails — a skipped required check
+        # can read as passing in some branch-protection configurations. Fail loudly
+        # and explicitly instead.
+        if: ${{ needs.test-shard.result != 'success' }}
+        run: |
+          echo "::error::One or more test shards failed (needs.test-shard.result=${{ needs.test-shard.result }})."
+          exit 1
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-shard-*
+          path: ${{ inputs.working-directory }}/.shard-artifacts
+      - name: Merge shard coverage
+        run: |
+          mkdir -p .nyc_output coverage
+          # Flatten each shard's coverage-final.json into .nyc_output/ under a unique
+          # name — nyc's report command aggregates every *.json file found there.
+          find .shard-artifacts -name coverage-final.json | nl -ba | while read -r idx path; do
+            cp "$path" ".nyc_output/shard-${idx}.json"
+          done
+          if [ -z "$(ls -A .nyc_output 2>/dev/null)" ]; then
+            echo "::error::No shard produced coverage/coverage-final.json — ensure the coverage reporter list includes \"json\" (see the test-shards input description)."
+            exit 1
+          fi
+          # --exclude '' neutralizes nyc's own default exclude-glob list (test files,
+          # mocha/karma/webpack configs, etc.) — each shard's coverage-final.json
+          # already reflects exactly the file set the caller's own coverage tool
+          # (e.g. Vitest, per its own coverage.exclude config) decided to instrument
+          # and report. Re-applying nyc's unrelated defaults on top at merge time
+          # would silently skew the merged percentage away from what a single
+          # non-sharded run would produce.
+          npx --yes nyc report --temp-dir .nyc_output --report-dir coverage \
+            --reporter=json-summary --reporter=text --exclude ''
+      - name: Enforce coverage threshold
+        if: ${{ inputs.coverage-fail-under != '0' }}
+        env:
+          COVERAGE_FAIL_UNDER: ${{ inputs.coverage-fail-under }}
+        run: |
+          pct=$(jq '.total.lines.pct' coverage/coverage-summary.json)
+          echo "Total line coverage (merged across ${{ inputs.test-shards }} shards): ${pct}%"
+          awk -v got="$pct" -v need="$COVERAGE_FAIL_UNDER" \
+            'BEGIN { if (got+0 < need+0) { printf "::error::coverage %.1f%% below threshold %s%%\n", got, need; exit 1 } }'
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: ${{ format('{0}coverage', env.WD_PREFIX) }}
+          flags: node
+          fail_ci_if_error: false
+      - name: Upload test results to Codecov (Test Analytics)
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: node
+          fail_ci_if_error: false
