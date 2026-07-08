@@ -416,8 +416,13 @@ jobs:
           # and report. Re-applying nyc's unrelated defaults on top at merge time
           # would silently skew the merged percentage away from what a single
           # non-sharded run would produce.
+          # --reporter=json regenerates a merged coverage-final.json — the RAW
+          # per-line report Codecov's uploader actually parses (json-summary is
+          # percentages-only and Codecov can't ingest it; a non-sharded run's
+          # coverage/ has this because the caller's own coverage.reporter list
+          # already includes "json", which is what feeds Codecov today).
           npx --yes nyc report --temp-dir .nyc_output --report-dir coverage \
-            --reporter=json-summary --reporter=text --exclude ''
+            --reporter=json-summary --reporter=json --reporter=text --exclude ''
       - name: Enforce coverage threshold
         if: ${{ inputs.coverage-fail-under != '0' }}
         env:
