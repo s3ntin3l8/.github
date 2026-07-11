@@ -17,7 +17,7 @@ on:
         type: string
         default: 'app'
       runner:
-        description: "Runner label(s) for the lint-and-test job, e.g. a self-hosted label. Defaults to GitHub-hosted."
+        description: "Runner label(s) for the type-and-test job, e.g. a self-hosted label. Defaults to GitHub-hosted."
         required: false
         type: string
         default: 'ubuntu-latest'
@@ -32,7 +32,7 @@ on:
 
 jobs:
   # Fast, dependency-light feedback: ruff needs no ML/runtime deps, so this
-  # reports in seconds instead of waiting behind lint-and-test's full install.
+  # reports in seconds instead of waiting behind type-and-test's full install.
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -47,7 +47,9 @@ jobs:
       - name: Lint and format check with ruff
         run: ruff check . && ruff format --check .
 
-  lint-and-test:
+  # Runs mypy, detect-secrets, pip-audit, and pytest. ruff/format live in the
+  # separate `lint` job above — this job no longer lints, hence the name.
+  type-and-test:
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 15
     steps:
