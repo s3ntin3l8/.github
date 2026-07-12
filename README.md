@@ -23,9 +23,10 @@ ruff, mypy, pytest+coverage, Codecov (coverage **and** Test Analytics), pip-audi
 - **Expects:** dev tooling installable via `requirements-dev.txt`, **or** a `pyproject.toml`/`setup.py` (installed with `pip install -e ".[dev]"`).
 
 ### [CI-Node](.github/workflows/ci-node.yml)
-Runs `lint` / `typecheck` (opt-in) / `test` npm scripts when present (the default `npm init` `exit 1` test stub is skipped), then builds.
+Runs `lint` / `typecheck` (opt-in) / `test` npm scripts when present (the default `npm init` `exit 1` test stub is skipped), detect-secrets, then builds.
 - **Caller permissions:** none beyond the default `contents: read`.
 - **Secrets:** `CODECOV_TOKEN` (optional) — pass via `secrets: inherit`.
+- **Detect-secrets:** opt-in on file presence, no caller YAML change needed — runs advisory-only the moment the repo has a `.secrets.baseline` at its root. Generate one with `detect-secrets scan > .secrets.baseline`. Set **`strict-checks`** to `true` once the baseline is verified clean (`detect-secrets scan --baseline .secrets.baseline` reports nothing new) to make it a hard gate.
 - **Inputs:**
   - `node-version` (default `22`)
   - `working-directory` (default `.`) — directory containing `package.json`, relative to the repo root. All shell steps run there; the Codecov `directory:` is computed relative to the repo root.

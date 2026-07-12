@@ -93,6 +93,18 @@ on:
         required: false
         type: boolean
         default: true
+      strict-checks:
+        description: >-
+          Fail the job on detect-secrets findings instead of reporting them
+          advisory-only (same convention as ci-python.yml's input of the same
+          name). Defaults to false: a repo whose baseline is stale relative to
+          its current tree, or that has never audited it, would otherwise go
+          instantly red on adoption. Flip to true once `detect-secrets scan
+          --baseline .secrets.baseline` (and, for real findings, `detect-secrets
+          audit .secrets.baseline`) comes back clean.
+        required: false
+        type: boolean
+        default: false
     secrets:
       CODECOV_TOKEN:
         required: false
@@ -162,6 +174,33 @@ jobs:
             turbo-${{ runner.os }}-
       - name: Install dependencies
         run: npm ci
+      # Opt-in on file presence (same convention as ci-python.yml): a repo gets
+      # scanning for free the moment it commits a .secrets.baseline, no caller
+      # YAML change needed. hashFiles() is workspace-root-relative regardless of
+      # `defaults: run: working-directory`, so this and the step below correctly
+      # look at the repo root even for monorepo callers. Advisory by default
+      # (continue-on-error) — verified against three real repos with existing
+      # baselines before this landed: one was clean, but two had stale
+      # baselines/unaudited findings (mostly false-positive "Secret Keyword"
+      # hits on GitHub Actions' own `secrets:` YAML key) that would have gone
+      # instantly red as a hard gate. Set strict-checks: true once a repo's
+      # baseline is verified clean. Pinned to the same detect-secrets version
+      # .pre-commit-config.yaml uses, so CI and local pre-commit can't diverge.
+      # Uses actions/setup-python rather than the runner's system Python to
+      # avoid PEP 668 "externally-managed-environment" errors on newer Ubuntu
+      # images.
+      - name: Set up Python (for detect-secrets)
+        if: ${{ hashFiles('.secrets.baseline') != '' }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - name: Detect secrets
+        if: ${{ hashFiles('.secrets.baseline') != '' }}
+        continue-on-error: ${{ !inputs.strict-checks }}
+        working-directory: .
+        run: |
+          pip install --quiet detect-secrets==1.5.0
+          git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
       # Detect scripts with `npm pkg get` (exact key lookup) instead of grepping
       # `npm run` output — the latter matched any script whose name OR body merely
       # contained "test"/"lint", and happily ran the `npm init` default
