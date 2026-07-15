@@ -75,6 +75,72 @@ Checks for vulnerable dependencies and license policy violations in PRs.
 - **Caller permissions:** `contents: read`.
 - **Inputs:** none.
 
+### [Hermes-Review](.github/workflows/hermes-review.yml)
+AI agent that acts on **`@s3ntin3l8-hermes` mentions** posted to a PR or issue by a human.
+The runner container does **not** run Hermes; it forwards the request to the **Hermes API
+server on `hermes-01`** (`192.168.2.6:8643`, the `review-bot` profile) over the LAN. The
+agent runs there — full tools, memory, skills — and **posts the review/comment back to
+GitHub itself** using a GitHub App token it mints via `app-token.sh`. This keeps runner
+containers lightweight (no hermes venv) while preserving the trigger-agnostic,
+centralized-prompt, reusable design. See [`s3ntin3l8/.github` #18](https://github.com/s3ntin3l8/.github/pull/18).
+- **ON-DEMAND ONLY.** This workflow does *not* auto-review PRs — automatic/bulk reviews
+  are driven separately by a Hermes **cronjob** (see *Out-of-Actions bot identity* below).
+- **PR mention** → diff review (uses [`hermes-review-prompt.md`](hermes-review-prompt.md)).
+- **Issue mention** → triage; may open a *draft* PR that **Closes #N** and is presented
+  for human approval (uses [`hermes-triage-prompt.md`](hermes-triage-prompt.md)).
+- **Caller permissions (required):** `contents: write`, `pull-requests: write`, `issues: write`, `checks: write`.
+- **Secrets:** `HERMES_APP_ID`, `HERMES_APP_PRIVATE_KEY` (used by the runner to resolve the PR/issue for routing), and `HERMES_API_KEY` (bearer key for the hermes-01 API server) — pass via `secrets: inherit`.
+- **Variables:** `HERMES_MODEL` (optional model override).
+- **Inputs:** `hermes-api-url` (default `http://192.168.2.6:8643`), `hermes-api-model` (default `hermes-agent`), `mention-trigger` (default `hermes`), `hermes-model`, `max-turns` (default `30`), `prompt-path` (default `hermes-review-prompt.md`), `issue-prompt-path` (default `hermes-triage-prompt.md`).
+- **Runner requirement:** a `self-hosted` runner with `gh`, `curl`, and `python3` on PATH (no hermes install needed).
+- **hermes-01 requirement:** the `review-bot` profile API server must be running and reachable from the runner — started with `hermes -p review-bot gateway`, with `API_SERVER_HOST` bound to the LAN interface (not `127.0.0.1`), `API_SERVER_PORT` set, and `API_SERVER_KEY` configured (that's `HERMES_API_KEY`).
+- **Expects:** a GitHub App installed on the calling repo with `Contents:Write` (open PRs), `Pull requests:Read&write`, `Checks:Read&write`, `Issues:Write` (triage); subscribe to *Issue comment* and *Pull request review comment* events.
+
+> **`@<slug>` mention trigger:** comment `@s3ntin3l8-hermes` on a PR (or reply to a review
+> comment) for a diff review, or on an issue for triage. The mention string is set via the
+> `mention-trigger` input (defaults to `hermes`; set it to your App slug, e.g.
+> `s3ntin3l8-hermes`). The bot is guarded against re-triggering itself.
+
+### Full caller example (on-demand, "@<slug>" mention on PRs or issues)
+```yaml
+name: Hermes (on-demand)
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  hermes:
+    # Only fire for comment events from a human (the bot never re-triggers itself).
+    # The actual "@<slug>" mention check is done inside the reusable workflow via the
+    # `mention-trigger` input, so the slug lives in exactly one place.
+    if: github.actor != 's3ntin3l8-hermes[bot]'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      checks: write
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
+    with:
+      mention-trigger: s3ntin3l8-hermes   # your GitHub App slug
+    secrets: inherit
+```
+
+### Out-of-Actions bot identity (open PRs / triage from any Hermes session)
+The reusable workflow mints the App token *inside* Actions. To let your local
+`review-bot` profile, gateway, or a **cronjob** act as the App *outside* a workflow,
+use [`scripts/app-token.sh`](scripts/app-token.sh). It signs a JWT with the App's
+private key and exchanges it for an installation token, so any `gh` / REST call is
+attributed to `<slug>[bot]` — not your account. Each invocation mints a fresh token
+(1-hour max lifetime), so scheduled runs sidestep expiry entirely. Configure it once
+in the `review-bot` profile's `.env` (`HERMES_APP_ID`, `HERMES_APP_PRIVATE_KEY`,
+`HERMES_INSTALLATION_ID`) and call `export GITHUB_TOKEN="$(~/.h....sh)"`.
+**This is a required setup step — the App credentials are NOT in the profile by default;**
+you must add `HERMES_APP_ID` + `HERMES_APP_PRIVATE_KEY` (and `HERMES_INSTALLATION_ID` if you
+installed the App on more than one account/org) to `~/.hermes/profiles/review-bot/.env` on
+`hermes-01`, plus copy `scripts/app-token.sh` to `~/.h....sh`.
+
 ### Minimal caller example
 ```yaml
 jobs:
