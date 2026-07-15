@@ -76,21 +76,24 @@ Checks for vulnerable dependencies and license policy violations in PRs.
 - **Inputs:** none.
 
 ### [Hermes-Review](.github/workflows/hermes-review.yml)
-AI agent (a **local Hermes instance** on your self-hosted runner, sharing the
-`review-bot` profile's persistent memory + skills) that acts on **`@s3ntin3l8-hermes` mentions**
-— posted to the PR or issue by a human. No internet exposure: the event reaches the
-runner over its outbound connection and Hermes is called on localhost; the only
-outbound call is the App-token-authed POST back to GitHub.
+AI agent that acts on **`@s3ntin3l8-hermes` mentions** posted to a PR or issue by a human.
+The runner container does **not** run Hermes; it forwards the request to the **Hermes API
+server on `hermes-01`** (`192.168.2.6:8642`, the `review-bot` profile) over the LAN. The
+agent runs there — full tools, memory, skills — and **posts the review/comment back to
+GitHub itself** using a GitHub App token it mints via `app-token.sh`. This keeps runner
+containers lightweight (no hermes venv) while preserving the trigger-agnostic,
+centralized-prompt, reusable design. See [`s3ntin3l8/.github` #18](https://github.com/s3ntin3l8/.github/pull/18).
 - **ON-DEMAND ONLY.** This workflow does *not* auto-review PRs — automatic/bulk reviews
   are driven separately by a Hermes **cronjob** (see *Out-of-Actions bot identity* below).
 - **PR mention** → diff review (uses [`hermes-review-prompt.md`](hermes-review-prompt.md)).
 - **Issue mention** → triage; may open a *draft* PR that **Closes #N** and is presented
   for human approval (uses [`hermes-triage-prompt.md`](hermes-triage-prompt.md)).
 - **Caller permissions (required):** `contents: write`, `pull-requests: write`, `issues: write`, `checks: write`.
-- **Secrets:** `HERMES_APP_ID`, `HERMES_APP_PRIVATE_KEY` (required) — pass via `secrets: inherit`.
+- **Secrets:** `HERMES_APP_ID`, `HERMES_APP_PRIVATE_KEY` (used by the runner to resolve the PR/issue for routing), and `HERMES_API_KEY` (bearer key for the hermes-01 API server) — pass via `secrets: inherit`.
 - **Variables:** `HERMES_MODEL` (optional model override).
-- **Inputs:** `hermes-profile` (default `review-bot`), `hermes-binary` (default `/home/bjoern/hermes-agent/venv/bin/hermes`), `hermes-model`, `max-turns` (default `30`), `prompt-path` (default `hermes-review-prompt.md`), `issue-prompt-path` (default `hermes-triage-prompt.md`).
-- **Runner requirement:** a `self-hosted` runner with `hermes` on PATH; the `review-bot` profile must exist on it (create once with `hermes profile create review-bot --clone`).
+- **Inputs:** `hermes-api-url` (default `http://192.168.2.6:8642`), `hermes-api-model` (default `hermes-agent`), `mention-trigger` (default `hermes`), `hermes-model`, `max-turns` (default `30`), `prompt-path` (default `hermes-review-prompt.md`), `issue-prompt-path` (default `hermes-triage-prompt.md`).
+- **Runner requirement:** a `self-hosted` runner with `gh`, `curl`, and `python3` on PATH (no hermes install needed).
+- **hermes-01 requirement:** the `review-bot` profile API server must be running and reachable from the runner — started with `hermes -p review-bot gateway`, with `API_SERVER_HOST` bound to the LAN interface (not `127.0.0.1`), `API_SERVER_PORT` set, and `API_SERVER_KEY` configured (that's `HERMES_API_KEY`).
 - **Expects:** a GitHub App installed on the calling repo with `Contents:Write` (open PRs), `Pull requests:Read&write`, `Checks:Read&write`, `Issues:Write` (triage); subscribe to *Issue comment* and *Pull request review comment* events.
 
 > **`@<slug>` mention trigger:** comment `@s3ntin3l8-hermes` on a PR (or reply to a review

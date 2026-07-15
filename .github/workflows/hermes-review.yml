@@ -1,18 +1,24 @@
 name: Hermes PR Review (reusable)
 
-# Reusable workflow: any repo with a self-hosted runner that has `hermes` on PATH
-# can call this to get an AI code review posted back to the PR.
+# Reusable workflow: any repo with a self-hosted runner can call this to get an AI
+# review / triage posted back to a PR or issue by the <slug>[bot] GitHub App.
 #
-# The Hermes process runs LOCALLY on the caller's self-hosted runner — it calls the
-# `hermes` binary already installed there (ideally the `review-bot` profile), sharing
-# that profile's persistent memory + skills. NOTHING is exposed to the internet: the
-# GitHub event reaches the runner over its existing outbound connection, and the runner
-# calls Hermes on localhost. The only outbound API call is from `hermes` itself, using
-# the GitHub App token minted below, to POST the review.
+# ARCHITECTURE (remote execution model):
+#   The runner container does NOT run Hermes. Instead it forwards the request to the
+#   Hermes API server running on a separate host (hermes-01) over the LAN. The agent
+#   executes THERE — full tools, memory, skills, github-code-review skill — and posts
+#   the review back to GitHub itself using a GitHub App token it mints via app-token.sh.
+#   This keeps the runner containers lightweight (no hermes venv) while preserving 100%
+#   of the agent behaviour. See s3ntin3l8/.github#18.
+#
+#   - Runner side: mints a GitHub App token (only to resolve the PR/issue via `gh` for
+#     trigger routing), checks the "@<slug>" mention, and relays the prompt to hermes-01.
+#   - hermes-01 side (review-bot profile API server): runs the agent. The agent re-mints
+#     its own App token from review-bot/.env and POSTs the review/comment.
 #
 # Triggers (define in the CALLING repo's workflow, not here — this is `workflow_call`).
 # This workflow is ON-DEMAND ONLY: it runs when someone comments "@<slug>" (your App
-# slug, e.g. "@s3ntin3l8-s-hermes") on a PR or issue. Automatic/bulk reviews are handled
+# slug, e.g. "@s3ntin3l8-hermes") on a PR or issue. Automatic/bulk reviews are handled
 # separately by a Hermes cronjob, per design. The mention substring is the `mention-trigger`
 # input (the reusable job's "Check mention" step enforces it; default "hermes").
 #   - issue_comment:             created, body contains "@<slug>"
@@ -25,14 +31,16 @@ name: Hermes PR Review (reusable)
 #   1. Register a GitHub App with permissions Contents:Write (open PRs), Pull requests:
 #      Read&write, Checks:Read&write, Issues:Write (triage); subscribe to Issue comment
 #      + Pull request review comment events; install on the repo.
-#   2. Repo secrets: HERMES_APP_ID, HERMES_APP_PRIVATE_KEY.
-#   3. Repo variable (optional): HERMES_MODEL (defaults to anthropic/claude-sonnet-4).
-#   4. A self-hosted runner labelled `self-hosted` with `hermes` on PATH.
-#   5. (Recommended) On the runner: `hermes profile create review-bot --clone`
-#      and `hermes config set approvals.mode off` for that profile.
+#   2. Repo secrets: HERMES_APP_ID, HERMES_APP_PRIVATE_KEY (used to resolve the PR/issue
+#      on the runner), HERMES_API_KEY (bearer key for the hermes-01 API server).
+#   3. Repo variable (optional): HERMES_MODEL (model override for the agent).
+#   4. A self-hosted runner labelled `self-hosted` with `gh` + `curl`/`python3` on PATH.
+#   5. A reachable Hermes API server on hermes-01 (review-bot profile) — started with
+#      `hermes -p review-bot gateway`, API_SERVER_HOST bound to the LAN interface
+#      (not 127.0.0.1), API_SERVER_PORT set, API_SERVER_KEY configured.
 #
 # Minimal caller example (in the *calling* repo's .github/workflows/hermes.yml):
-#   name: Hermes (on-demand, @hermes)
+#   name: Hermes (on-demand, @<slug>)
 #   on:
 #     issue_comment:
 #       types: [created]
@@ -40,17 +48,15 @@ name: Hermes PR Review (reusable)
 #       types: [created]
 #   jobs:
 #     hermes:
-#       if: >-
-#         github.actor != 'hermes-review[bot]' && (
-#           (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@hermes')) ||
-#           (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@hermes'))
-#         )
+#       if: github.actor != 's3ntin3l8-hermes[bot]'
 #       permissions:
 #         contents: write
 #         pull-requests: write
 #         issues: write
 #         checks: write
 #       uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
+#       with:
+#         mention-trigger: s3ntin3l8-hermes
 #       secrets: inherit
 
 on:
@@ -62,20 +68,26 @@ on:
       HERMES_APP_PRIVATE_KEY:
         required: true
         description: GitHub App PEM private key.
-    inputs:
-      hermes-profile:
-        required: false
-        type: string
-        default: review-bot
-        description: Hermes profile to run the review under (must exist on the runner).
-      hermes-binary:
-        required: false
-        type: string
-        default: /home/bjoern/hermes-agent/venv/bin/hermes
+      HERMES_API_KEY:
+        required: true
         description: >-
-          Absolute path to the `hermes` binary on the runner. Use an absolute path so
-          a separate runner service account (which may not inherit your login PATH)
-          cannot fail to find it. Override if your runner installs hermes elsewhere.
+          Bearer key for the hermes-01 API server (API_SERVER_KEY). Distinct from the
+          App PEM. The agent uses this to authenticate the run; it mints the GitHub
+          token itself for posting.
+    inputs:
+      hermes-api-url:
+        required: false
+        type: string
+        default: http://192.168.2.6:8642
+        description: >-
+          Base URL of the Hermes API server (review-bot profile) on hermes-01. Must be
+          reachable from the runner over the LAN; bind API_SERVER_HOST to the LAN iface,
+          not 127.0.0.1.
+      hermes-api-model:
+        required: false
+        type: string
+        default: hermes-agent
+        description: Model name the API server advertises (API_SERVER_MODEL_NAME).
       mention-trigger:
         required: false
         type: string
@@ -83,21 +95,20 @@ on:
         description: >-
           Mention substring that triggers the bot (without the leading @). Defaults to
           "hermes". Set this to your GitHub App slug so comments like "@<slug>" fire the
-          workflow — e.g. "s3ntin3l8-s-hermes". The caller passes it into the `if:`
-          guard (see the README caller example); the reusable workflow does not itself
-          parse the comment, so the caller must use this value in its contains() check.
+          workflow — e.g. "s3ntin3l8-hermes". The reusable job's "Check mention" step
+          enforces it, so the slug lives in exactly one place (the caller's with:).
       hermes-model:
         required: false
         type: string
         default: ''
         description: >-
-          Model override (e.g. anthropic/claude-sonnet-4). Empty => falls back to the
-          repo variable HERMES_MODEL, then to the workflow default.
+          Model override passed to the agent (e.g. anthropic/claude-sonnet-4). Empty =>
+          falls back to the repo variable HERMES_MODEL, then the agent's profile default.
       max-turns:
         required: false
         type: number
         default: 30
-        description: Max agent turns for the review (guards against runaway runs).
+        description: Max agent turns for the run (guards against runaway runs).
       prompt-path:
         required: false
         type: string
@@ -118,7 +129,7 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 30
     steps:
-      - name: Create GitHub App token
+      - name: Create GitHub App token (runner-side, for trigger resolution)
         id: app-token
         uses: actions/create-github-app-token@v2
         with:
@@ -126,8 +137,8 @@ jobs:
           private-key: ${{ secrets.HERMES_APP_PRIVATE_KEY }}
 
       # Early exit unless the comment actually contains the configured mention. This
-      # keeps the slug in ONE place (the mention-trigger input) instead of the caller's
-      # if:. GitHub normalizes the event payload's comment body field, so we probe both.
+      # keeps the slug in ONE place (the mention-trigger input). GitHub normalizes the
+      # event payload's comment body field, so we probe both common shapes.
       - name: Check mention
         env:
           MENTION: ${{ inputs.mention-trigger }}
@@ -139,10 +150,8 @@ jobs:
             exit 0   # not a failure: leave the run green
           fi
 
-      # Resolve WHAT was mentioned. The job only proceeds for PRs/issues that carried
-      # the mention. We detect PR vs. issue to branch the behaviour:
-      #   - PR (pull_request_review_comment, or issue_comment on a PR) -> diff review
-      #   - Issue (issues, or issue_comment on an issue)              -> triage
+      # Resolve WHAT was mentioned, so we can route to the right prompt and tell the
+      # agent which PR/issue to act on. Uses the runner-side App token (read-only view).
       - name: Resolve target (PR diff vs issue triage)
         id: target
         env:
@@ -156,25 +165,11 @@ jobs:
             PR_NUM="${{ github.event.pull_request.number || github.event.issue.number || github.event.pull_request_review_comment.pull_request_number }}"
             echo "kind=pr"        >> "$GITHUB_OUTPUT"
             echo "number=$PR_NUM" >> "$GITHUB_OUTPUT"
-            PR_JSON=$(gh api "repos/$REPO/pulls/$PR_NUM")
-            echo "head=$(echo "$PR_JSON" | jq -r .head.sha)" >> "$GITHUB_OUTPUT"
-            echo "base=$(echo "$PR_JSON" | jq -r .base.ref)"  >> "$GITHUB_OUTPUT"
           else
-            # issue or issue_comment on an issue
             ISSUE_NUM="${{ github.event.issue.number }}"
-            echo "kind=issue"         >> "$GITHUB_OUTPUT"
-            echo "number=$ISSUE_NUM"  >> "$GITHUB_OUTPUT"
+            echo "kind=issue"        >> "$GITHUB_OUTPUT"
+            echo "number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
           fi
-
-      # Checkout the CALLING repo (the PR lives here), so a PR review reads the diff.
-      # Skipped for issues (nothing to diff).
-      - name: Checkout PR head (caller repo)
-        if: steps.target.outputs.kind == 'pr'
-        uses: actions/checkout@v4
-        with:
-          token: ${{ steps.app-token.outputs.token }}
-          ref: ${{ steps.target.outputs.head }}
-          fetch-depth: 0
 
       # Checkout THIS shared repo to fetch the prompt(s) (read-only, no token needed).
       - name: Checkout shared repo (prompt source)
@@ -187,32 +182,68 @@ jobs:
             ${{ inputs.prompt-path }}
             ${{ inputs.issue-prompt-path }}
 
-      - name: Fetch base branch for diffing
-        if: steps.target.outputs.kind == 'pr'
-        run: git fetch origin ${{ steps.target.outputs.base }}
-
-      - name: Verify hermes binary exists on this runner
-        run: |
-          HERMES_BIN="${{ inputs.hermes-binary }}"
-          [ -x "$HERMES_BIN" ] || { echo "::error::hermes binary not executable at: $HERMES_BIN"; exit 1; }
-
-      - name: Run Hermes (local instance, shared memory)
+      # Relay the request to the Hermes API server on hermes-01. The agent runs there
+      # with full tools/memory/skills, re-mints its own GitHub App token, and posts the
+      # review/comment back to GitHub itself. We only forward: which target, the prompt,
+      # and the model override. The final assistant text is echoed to the log for visibility.
+      - name: Run Hermes (remote agent on hermes-01)
+        id: run
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          API_URL: ${{ inputs.hermes-api-url }}
+          API_KEY: ${{ secrets.HERMES_API_KEY }}
+          API_MODEL: ${{ inputs.hermes-api-model }}
           TARGET_KIND: ${{ steps.target.outputs.kind }}
-          ISSUE_OR_PR_NUMBER: ${{ steps.target.outputs.number }}
+          TARGET_NUMBER: ${{ steps.target.outputs.number }}
           REPO: ${{ github.repository }}
-          BASE_REF: ${{ steps.target.outputs.base }}
-          HEAD_SHA: ${{ steps.target.outputs.head }}
-          MODEL: ${{ inputs.hermes-model || vars.HERMES_MODEL || 'anthropic/claude-sonnet-4' }}
-          PROFILE: ${{ inputs.hermes-profile }}
+          MODEL: ${{ inputs.hermes-model || vars.HERMES_MODEL || '' }}
           PROMPT_FILE: .hermes-shared/${{ steps.target.outputs.kind == 'pr' && inputs.prompt-path || inputs.issue-prompt-path }}
           MAX_TURNS: ${{ inputs.max-turns }}
-          HERMES_BIN: ${{ inputs.hermes-binary }}
         run: |
           set -euo pipefail
           [ -f "$PROMPT_FILE" ] || { echo "::error::prompt not found: $PROMPT_FILE"; exit 1; }
-          "$HERMES_BIN" -p "$PROFILE" -s github-code-review chat -Q --yolo \
-            -m "$MODEL" --max-turns "$MAX_TURNS" \
-            -t terminal,file,code_execution,memory \
-            -q "$(cat "$PROMPT_FILE")"
+
+          # Build the user message: hand the agent the target + repo explicitly, since
+          # it has no access to the runner's event payload or injected env. It re-derives
+          # the diff/issue via gh using its own App token.
+          MSG=$(cat <<PYEOF
+          Target: $TARGET_KIND #$TARGET_NUMBER in repo $REPO
+          Use the github-code-review skill (for a PR) or your triage procedure (for an issue)
+          to act on it. The GitHub App token is available to you via scripts/app-token.sh in
+          the review-bot profile; mint it before calling gh. Do NOT ask the human for secrets.
+
+          $(cat "$PROMPT_FILE")
+          PYEOF
+          )
+
+          python3 - <<'PY'
+          import os, sys, json, urllib.request
+
+          url = os.environ["API_URL"].rstrip("/") + "/v1/chat/completions"
+          key = os.environ["API_KEY"]
+          model = os.environ.get("API_MODEL") or "hermes-agent"
+          msg = os.environ["MSG"] if "MSG" in os.environ else sys.stdin.read()
+          body = {
+              "model": model,
+              "messages": [{"role": "user", "content": msg}],
+              "stream": False,
+          }
+          req = urllib.request.Request(
+              url, data=json.dumps(body).encode(), method="POST",
+              headers={"Authorization": f"Bearer {key}",
+                        "Content-Type": "application/json"},
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=1200) as r:
+                  data = json.load(r)
+          except urllib.error.HTTPError as e:
+              sys.stderr.write(f"::error::Hermes API error {e.code}: {e.read().decode()[:500]}\n")
+              sys.exit(1)
+          content = data["choices"][0]["message"]["content"]
+          print("=== Hermes agent output ===")
+          print(content[:8000])
+          PY
+
+# NOTE: No "post review" step here — the agent on hermes-01 performs the POST using its
+# own App token, exactly as PR #18's original local design did. This preserves the
+# centralized-prompt, trigger-agnostic, reusable behaviour without installing Hermes on
+# the runner.
