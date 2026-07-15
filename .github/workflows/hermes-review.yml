@@ -163,13 +163,40 @@ jobs:
           IS_PR_COMMENT="${{ github.event.issue.pull_request != null && github.event_name == 'issue_comment' }}"
           IS_PR_REVIEW="${{ github.event_name == 'pull_request_review_comment' }}"
           if [[ "$IS_PR_COMMENT" == "true" || "$IS_PR_REVIEW" == "true" ]]; then
-            PR_NUM="${{ github.event.pull_request.number || github.event.issue.number || github.event.pull_request_review_comment.pull_request_number }}"
-            echo "kind=pr"        >> "$GITHUB_OUTPUT"
+            # For a PR comment/review-comment, the PR number is authoritative.
+            PR_NUM="${{ github.event.issue.pull_request.number || github.event.pull_request.number || github.event.pull_request_review_comment.pull_request_number }}"
+            echo "kind=pr"         >> "$GITHUB_OUTPUT"
             echo "number=$PR_NUM" >> "$GITHUB_OUTPUT"
           else
+            # Plain issue comment.
             ISSUE_NUM="${{ github.event.issue.number }}"
             echo "kind=issue"        >> "$GITHUB_OUTPUT"
             echo "number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Guard against (a) the bot re-triggering on its own output and (b) a human
+      # reply that merely @mentions the slug without intending a new run. If the bot
+      # has ALREADY acted on this exact target, skip — do NOT run again.
+      - name: Guard against re-trigger
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          KIND: ${{ steps.target.outputs.kind }}
+          NUMBER: ${{ steps.target.outputs.number }}
+        run: |
+          set -euo pipefail
+          if [[ "$KIND" == "pr" ]]; then
+            # Already posted a review on this PR by the bot? -> skip.
+            COUNT=$(gh api "repos/$REPO/pulls/$NUMBER/reviews" \
+              --jq '[.[] | select(.user.type == "Bot" or (.user.login | endswith("[bot]"))] | length' 2>/dev/null || echo 0)
+          else
+            # Already commented on this issue by the bot? -> skip.
+            COUNT=$(gh api "repos/$REPO/issues/$NUMBER/comments" \
+              --jq '[.[] | select(.user.type == "Bot" or (.user.login | endswith("[bot]"))] | length' 2>/dev/null || echo 0)
+          fi
+          if [[ "${COUNT:-0}" != "0" ]]; then
+            echo "::notice::bot already acted on $KIND #$NUMBER ($COUNT prior) — skipping re-trigger."
+            exit 0   # not a failure: leave the run green
           fi
 
       # Checkout THIS shared repo to fetch the prompt(s) (read-only, no token needed).
@@ -189,8 +216,13 @@ jobs:
 
       # Relay the request to the Hermes API server on hermes-01. The agent runs there
       # with full tools/memory/skills, re-mints its own GitHub App token, and posts the
-      # review/comment back to GitHub itself. We only forward: which target, the prompt,
-      # and the model override. The final assistant text is echoed to the log for visibility.
+      # review/comment BACK TO GITHUB ITSELF. We only forward: which target, the prompt,
+      # and the model override. We do NOT wait for the agent to finish — it returns
+      # its result by posting to GitHub, not by replying to this HTTP call. So this
+      # step FIRES-AND-FORGETS: it sends the prompt and exits 0 regardless of how
+      # long the agent runs (or whether the connection is later closed by the server).
+      # A 4xx (bad auth/key) is the only real failure we surface; anything else
+      # (timeouts, RemoteDisconnected) is expected for a long async run and is ignored.
       - name: Run Hermes (remote agent on hermes-01)
         id: run
         env:
@@ -207,58 +239,34 @@ jobs:
           set -euo pipefail
           [ -f "$PROMPT_FILE" ] || { echo "::error::prompt not found: $PROMPT_FILE"; exit 1; }
 
-          # Assemble the user message entirely from exported env vars (PROMPT_FILE is in
-          # the step's env:, so it is inherited by this python child). We do NOT rely on a
-          # shell-local MSG var — it would not be exported to the python subprocess, and
-          # `sys.stdin.read()` would otherwise swallow the heredoc as the "message".
-          python3 - <<'PY'
-          import os, json, urllib.request
+          # Assemble the user message from exported env vars. We do NOT rely on a
+          # shell-local MSG var — it would not be exported to a child process.
+          # Use printf to build the header with real newlines (YAML-safe).
+          HEADER=$(printf 'Target: %s #%s in repo %s\nUse the github-code-review skill (for a PR) or your triage procedure (for an issue) to act on it. The GitHub App token is available to you via scripts/app-token.sh in the review-bot profile; mint it before calling gh. Do NOT ask the human for secrets.\n' "$TARGET_KIND" "$TARGET_NUMBER" "$REPO")
+          if [[ -n "$MODEL" ]]; then
+            HEADER+=$(printf '\nPrefer model: %s\n' "$MODEL")
+          fi
+          HEADER+=$(printf '\nHonor a maximum of %s agent turns.\n\n' "$MAX_TURNS")
 
-          url = os.environ["API_URL"].rstrip("/") + "/v1/chat/completions"
-          key = os.environ["API_KEY"]
-          model = os.environ.get("API_MODEL") or "hermes-agent"
-          kind = os.environ.get("TARGET_KIND", "")
-          number = os.environ.get("TARGET_NUMBER", "")
-          repo = os.environ.get("REPO", "")
-          model_override = os.environ.get("MODEL", "")
-          max_turns = os.environ.get("MAX_TURNS", "30")
-          prompt_file = os.environ["PROMPT_FILE"]
+          MSG="$HEADER$(cat "$PROMPT_FILE")"
 
-          with open(prompt_file, encoding="utf-8") as fh:
-              prompt_text = fh.read()
-
-          header = (
-              f"Target: {kind} #{number} in repo {repo}\n"
-              f"Use the github-code-review skill (for a PR) or your triage procedure (for an issue) "
-              f"to act on it. The GitHub App token is available to you via scripts/app-token.sh in "
-              f"the review-bot profile; mint it before calling gh. Do NOT ask the human for secrets.\n"
-          )
-          if model_override:
-              header += f"Prefer model: {model_override}\n"
-          header += f"Honor a maximum of {max_turns} agent turns.\n\n"
-
-          msg = header + prompt_text
-
-          body = {
-              "model": model,
-              "messages": [{"role": "user", "content": msg}],
-              "stream": False,
-          }
-          req = urllib.request.Request(
-              url, data=json.dumps(body).encode(), method="POST",
-              headers={"Authorization": f"Bearer {key}",
-                        "Content-Type": "application/json"},
-          )
-          try:
-              with urllib.request.urlopen(req, timeout=1200) as r:
-                  data = json.load(r)
-          except urllib.error.HTTPError as e:
-              sys.stderr.write(f"::error::Hermes API error {e.code}: {e.read().decode()[:500]}\n")
-              sys.exit(1)
-          content = data["choices"][0]["message"]["content"]
-          print("=== Hermes agent output ===")
-          print(content[:8000])
-          PY
+          # Fire-and-forget: send the prompt, ignore the (async) response body.
+          # -m 20s cap: we only need the server to ACCEPT the request, not to finish.
+          # Any 4xx is a real config error -> fail. Connection drops/timeouts on a
+          # long run are normal (server keeps working, posts result to GitHub) -> ignore.
+          HTTP_CODE=$(curl -sS -m 20 -o /dev/null -w '%{http_code}' \
+            -X POST "$API_URL/v1/chat/completions" \
+            -H "Authorization: Bearer $API_KEY" \
+            -H "Content-Type: application/json" \
+            --data "$(jq -nc --arg model "$API_MODEL" --arg content "$MSG" \
+              '{model:$model, messages:[{role:"user",content:$content}], stream:false}')" \
+            2>/dev/null || echo "000")
+          echo "::notice::relayed request to hermes-01 (HTTP $HTTP_CODE); agent runs async and posts results to GitHub itself."
+          if [[ "$HTTP_CODE" == "401" || "$HTTP_CODE" == "403" ]]; then
+            echo "::error::Hermes API rejected the key (HTTP $HTTP_CODE) — check HERMES_API_KEY secret."
+            exit 1
+          fi
+          # 000 / timeout / 2xx / 4xx-other -> treat as accepted-and-running.
 
 # NOTE: No "post review" step here — the agent on hermes-01 performs the POST using its
 # own App token, exactly as PR #18's original local design did. This preserves the

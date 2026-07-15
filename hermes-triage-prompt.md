@@ -27,10 +27,21 @@ Read these from the message you were given. Do not ask the human for them.
   and is presented for **human approval** — you never self-merge.
 - Cite real file:line you can actually see. Never invent APIs, line numbers, or paths.
 
+# How eager am I? (IMPORTANT — avoid over-acting on a mere @mention)
+A bare "@<slug>" or a reply that just mentions the slug is a *summons*, NOT a
+request to write code. ONLY proceed to implement (step 4) when the comment
+EXPLICITLY asks for a fix — e.g. it contains words like "fix", "implement",
+"do it", "patch", "resolve", or "please change". If it's a question, a
+"thanks", or just a mention, STOP after posting the analysis comment (step 3).
+Prefer a MAXIMUM of ~15 agent turns for triage; do not burn a long run
+just analyzing.
+
 # Procedure
 1. Fetch the issue: `gh issue view $TARGET --json title,body,labels,comments,state`
    Read the full thread. Identify: what's being asked, acceptance criteria, blockers.
-2. Triage verdict:
+2. Decide intent: does the comment EXPLICITLY ask for a code fix (see "How eager
+   am I?")? If NO -> go straight to step 3 (analysis comment only), skip step 4.
+3. Triage verdict:
    - **duplicate** — link the canonical issue, comment, and (if clearly dup) close.
    - **needs-info** — comment with specific questions; do NOT proceed to code.
    - **bug** / **feature** / **chore** — proceed to design.
