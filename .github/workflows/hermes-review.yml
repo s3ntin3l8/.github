@@ -148,7 +148,13 @@ jobs:
       # Early exit unless the comment actually contains the configured mention. This
       # keeps the slug in ONE place (the mention-trigger input). GitHub normalizes the
       # event payload's comment body field, so we probe both common shapes.
+      # IMPORTANT: this step sets a `skip` output; every downstream step is gated on it
+      # (see the `if: steps.check-mention.outputs.skip != 'true'` on each). A bare
+      # `exit 0` here does NOT stop later steps — without the gate the relay would fire
+      # on EVERY comment regardless of mention (this was the bug that made the bot
+      # review on non-summoning comments, e.g. s3ntin3l8/.github#527 follow-up).
       - name: Check mention
+        id: check-mention
         env:
           MENTION: ${{ inputs.mention-trigger }}
           BODY: ${{ github.event.comment.body || github.event.review.body || github.event.issue.body }}
@@ -156,13 +162,16 @@ jobs:
           set -euo pipefail
           if [[ -z "${BODY:-}" ]] || ! echo "$BODY" | grep -q "@$MENTION"; then
             echo "::notice::No '@$MENTION' mention found — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0   # not a failure: leave the run green
           fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
       # Resolve WHAT was mentioned, so we can route to the right prompt and tell the
       # agent which PR/issue to act on. Uses the runner-side App token (read-only view).
       - name: Resolve target (PR diff vs issue triage)
         id: target
+        if: steps.check-mention.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
@@ -186,6 +195,7 @@ jobs:
       # reply that merely @mentions the slug without intending a new run. If the bot
       # has ALREADY acted on this exact target, skip — do NOT run again.
       - name: Guard against re-trigger
+        if: steps.check-mention.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
@@ -212,6 +222,7 @@ jobs:
       # patterns — bare filenames like "hermes-review-prompt.md" are rejected
       # ("not a directory"). Disable cone mode so file paths work.
       - name: Checkout shared repo (prompt source)
+        if: steps.check-mention.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           repository: s3ntin3l8/.github
@@ -233,6 +244,7 @@ jobs:
       # (timeouts, RemoteDisconnected) is expected for a long async run and is ignored.
       - name: Run Hermes (remote agent on hermes-01)
         id: run
+        if: steps.check-mention.outputs.skip != 'true'
         env:
           API_URL: ${{ inputs.hermes-api-url }}
           API_KEY: ${{ secrets.HERMES_API_KEY }}
