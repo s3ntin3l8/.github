@@ -173,12 +173,16 @@ jobs:
           fi
 
       # Checkout THIS shared repo to fetch the prompt(s) (read-only, no token needed).
+      # NOTE: sparse-checkout defaults to cone mode, which only accepts DIRECTORY
+      # patterns — bare filenames like "hermes-review-prompt.md" are rejected
+      # ("not a directory"). Disable cone mode so file paths work.
       - name: Checkout shared repo (prompt source)
         uses: actions/checkout@v4
         with:
           repository: s3ntin3l8/.github
           ref: main
           path: .hermes-shared
+          sparse-checkout-cone-mode: false
           sparse-checkout: |
             ${{ inputs.prompt-path }}
             ${{ inputs.issue-prompt-path }}

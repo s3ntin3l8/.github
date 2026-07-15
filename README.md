@@ -94,7 +94,7 @@ centralized-prompt, reusable design. See [`s3ntin3l8/.github` #18](https://githu
 - **Inputs:** `hermes-api-url` (default `http://192.168.2.6:8643`), `hermes-api-model` (default `hermes-agent`), `mention-trigger` (default `hermes`), `hermes-model`, `max-turns` (default `30`), `prompt-path` (default `hermes-review-prompt.md`), `issue-prompt-path` (default `hermes-triage-prompt.md`).
 - **Runner requirement:** a `self-hosted` runner with `gh`, `curl`, and `python3` on PATH (no hermes install needed).
 - **hermes-01 requirement:** the `review-bot` profile API server must be running and reachable from the runner — started with `hermes -p review-bot gateway`, with `API_SERVER_HOST` bound to the LAN interface (not `127.0.0.1`), `API_SERVER_PORT` set, and `API_SERVER_KEY` configured (that's `HERMES_API_KEY`).
-- **Expects:** a GitHub App installed on the calling repo with `Contents:Write` (open PRs), `Pull requests:Read&write`, `Checks:Read&write`, `Issues:Write` (triage); subscribe to *Issue comment* and *Pull request review comment* events.
+- **Expects:** a GitHub App installed on the calling repo with `Contents:Write` (open PRs), `Pull requests:Read&write`, `Checks:Read&write`, `Issues:Write` (triage). Triggering is **Actions-driven** (the *calling* repo defines `on: issue_comment` / `pull_request_review_comment`), so the App does **not** need to subscribe to those webhook events — that's handled by GitHub Actions, not the App.
 
 > **`@<slug>` mention trigger:** comment `@s3ntin3l8-hermes` on a PR (or reply to a review
 > comment) for a diff review, or on an issue for triage. The mention string is set via the
