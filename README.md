@@ -93,11 +93,12 @@ outbound call is the App-token-authed POST back to GitHub.
 - **Runner requirement:** a `self-hosted` runner with `hermes` on PATH; the `review-bot` profile must exist on it (create once with `hermes profile create review-bot --clone`).
 - **Expects:** a GitHub App installed on the calling repo with `Contents:Write` (open PRs), `Pull requests:Read&write`, `Checks:Read&write`, `Issues:Write` (triage); subscribe to *Issue comment* and *Pull request review comment* events.
 
-> **`@hermes` mention trigger:** comment `@hermes` on a PR (or reply to a review comment)
-> for a diff review, or on an issue for triage. Match the mention string to your App slug
-> (e.g. `@hermes-review`). The bot is guarded against re-triggering itself.
+> **`@<slug>` mention trigger:** comment `@s3ntin3l8-s-hermes` on a PR (or reply to a review
+> comment) for a diff review, or on an issue for triage. The mention string is set via the
+> `mention-trigger` input (defaults to `hermes`; set it to your App slug, e.g.
+> `s3ntin3l8-s-hermes`). The bot is guarded against re-triggering itself.
 
-### Full caller example (on-demand, @hermes on PRs or issues)
+### Full caller example (on-demand, "@<slug>" mention on PRs or issues)
 ```yaml
 name: Hermes (on-demand)
 on:
@@ -108,18 +109,18 @@ on:
 
 jobs:
   hermes:
-    # Respond to "@hermes" only (never let the bot re-trigger itself).
-    if: >-
-      github.actor != 'hermes-review[bot]' && (
-        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@hermes')) ||
-        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@hermes'))
-      )
+    # Only fire for comment events from a human (the bot never re-triggers itself).
+    # The actual "@<slug>" mention check is done inside the reusable workflow via the
+    # `mention-trigger` input, so the slug lives in exactly one place.
+    if: github.actor != 'hermes-review[bot]'
     permissions:
       contents: write
       pull-requests: write
       issues: write
       checks: write
     uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
+    with:
+      mention-trigger: s3ntin3l8-s-hermes   # your GitHub App slug
     secrets: inherit
 ```
 

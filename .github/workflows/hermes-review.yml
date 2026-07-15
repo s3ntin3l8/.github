@@ -11,12 +11,14 @@ name: Hermes PR Review (reusable)
 # the GitHub App token minted below, to POST the review.
 #
 # Triggers (define in the CALLING repo's workflow, not here — this is `workflow_call`).
-# This workflow is ON-DEMAND ONLY: it runs when someone comments "@hermes" on a PR or
-# issue. Automatic/bulk reviews are handled separately by a Hermes cronjob, per design.
-#   - issue_comment:             created, body contains "@hermes"
+# This workflow is ON-DEMAND ONLY: it runs when someone comments "@<slug>" (your App
+# slug, e.g. "@s3ntin3l8-s-hermes") on a PR or issue. Automatic/bulk reviews are handled
+# separately by a Hermes cronjob, per design. The mention substring is the `mention-trigger`
+# input (the reusable job's "Check mention" step enforces it; default "hermes").
+#   - issue_comment:             created, body contains "@<slug>"
 #       * on a PR  -> diff review (uses hermes-review-prompt.md)
 #       * on an issue -> triage   (uses hermes-triage-prompt.md)
-#   - pull_request_review_comment: created, body contains "@hermes" -> inline diff review
+#   - pull_request_review_comment: created, body contains "@<slug>" -> inline diff review
 # The target (PR vs issue) is resolved at run time, so the same job serves both.
 #
 # Required caller setup (once per calling repo):
@@ -74,6 +76,16 @@ on:
           Absolute path to the `hermes` binary on the runner. Use an absolute path so
           a separate runner service account (which may not inherit your login PATH)
           cannot fail to find it. Override if your runner installs hermes elsewhere.
+      mention-trigger:
+        required: false
+        type: string
+        default: hermes
+        description: >-
+          Mention substring that triggers the bot (without the leading @). Defaults to
+          "hermes". Set this to your GitHub App slug so comments like "@<slug>" fire the
+          workflow — e.g. "s3ntin3l8-s-hermes". The caller passes it into the `if:`
+          guard (see the README caller example); the reusable workflow does not itself
+          parse the comment, so the caller must use this value in its contains() check.
       hermes-model:
         required: false
         type: string
@@ -99,7 +111,9 @@ on:
 
 jobs:
   hermes-review:
-    # Trigger-agnostic guard: never let the bot re-trigger itself when it posts.
+    # The caller gates the cheap event-type + self-trigger checks (see README). The
+    # actual "@<mention-trigger>" substring check happens in the "Check mention" step
+    # below, using the mention-trigger input, so the slug lives in exactly one place.
     if: github.actor != 'hermes-review[bot]'
     runs-on: self-hosted
     timeout-minutes: 30
@@ -111,8 +125,22 @@ jobs:
           app-id: ${{ secrets.HERMES_APP_ID }}
           private-key: ${{ secrets.HERMES_APP_PRIVATE_KEY }}
 
-      # Resolve WHAT was mentioned. All triggers are gated by "@hermes", so this job
-      # only runs on demand. We detect PR vs. issue to branch the behaviour:
+      # Early exit unless the comment actually contains the configured mention. This
+      # keeps the slug in ONE place (the mention-trigger input) instead of the caller's
+      # if:. GitHub normalizes the event payload's comment body field, so we probe both.
+      - name: Check mention
+        env:
+          MENTION: ${{ inputs.mention-trigger }}
+          BODY: ${{ github.event.comment.body || github.event.review.body || github.event.issue.body }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${BODY:-}" ]] || ! echo "$BODY" | grep -q "@$MENTION"; then
+            echo "::notice::No '@$MENTION' mention found — skipping."
+            exit 0   # not a failure: leave the run green
+          fi
+
+      # Resolve WHAT was mentioned. The job only proceeds for PRs/issues that carried
+      # the mention. We detect PR vs. issue to branch the behaviour:
       #   - PR (pull_request_review_comment, or issue_comment on a PR) -> diff review
       #   - Issue (issues, or issue_comment on an issue)              -> triage
       - name: Resolve target (PR diff vs issue triage)
