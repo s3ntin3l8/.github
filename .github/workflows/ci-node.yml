@@ -423,6 +423,16 @@ jobs:
     env:
       WD_PREFIX: ${{ inputs.working-directory == '.' && '' || format('{0}/', inputs.working-directory) }}
     steps:
+      # Unlike lint-and-test/test-shard, this job doesn't need source to merge
+      # coverage or run tests — but codecov/codecov-action does need a real git
+      # checkout present to resolve the repo root and relativize the shard
+      # coverage's absolute (`/home/runner/work/...`) file paths against it.
+      # Without this, Codecov's backend can't reconcile those paths against the
+      # repo tree it fetches from GitHub and rejects the upload as an unusable
+      # report (path mismatch / source code unavailable) — silent since the
+      # upload step itself has fail_ci_if_error: false, so CI stays green while
+      # every commit's coverage (and any PR diffed against it as a base) is lost.
+      - uses: actions/checkout@v6
       - name: Fail if any shard failed
         # `needs: test-shard` without this check would leave test-merge simply not
         # running (shown as "skipped") when a shard fails — a skipped required check
