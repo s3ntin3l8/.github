@@ -24,8 +24,14 @@ name: Hermes PR Review (reusable)
 #   - issue_comment:             created, body contains "@<slug>"
 #       * on a PR  -> diff review (uses hermes-review-prompt.md)
 #       * on an issue -> triage   (uses hermes-triage-prompt.md)
-#   - pull_request_review_comment: created, body contains "@<slug>" -> inline diff review
 # The target (PR vs issue) is resolved at run time, so the same job serves both.
+#
+# IMPORTANT: do NOT subscribe to `pull_request_review_comment` (or `pull_request_review`).
+# A submitted review fires those events, and the review body routinely contains the
+# "@<slug>" string (e.g. when another bot like Claude reviews, or the bot itself
+# echoes context). That re-triggers this workflow with NO human summon -> an unwanted
+# cascade. On-demand @mention works through issue_comment alone (PR-conversation
+# comments and issue comments BOTH arrive as issue_comment). See s3ntin3l8/.github#527.
 #
 # Required caller setup (once per calling repo):
 #   1. Register a GitHub App with permissions Contents:Write (open PRs), Pull requests:
@@ -44,8 +50,10 @@ name: Hermes PR Review (reusable)
 #   on:
 #     issue_comment:
 #       types: [created]
-#     pull_request_review_comment:
-#       types: [created]
+#   (do NOT add pull_request_review_comment — a submitted review fires that
+#    event, and review bodies routinely contain "@<slug>", so it re-triggers
+#    this workflow with NO human summon. issue_comment alone covers both
+#    PR-conversation mentions and issue mentions.)
 #   jobs:
 #     hermes:
 #       if: github.actor != 's3ntin3l8-hermes[bot]'

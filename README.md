@@ -94,7 +94,7 @@ centralized-prompt, reusable design. See [`s3ntin3l8/.github` #18](https://githu
 - **Inputs:** `hermes-api-url` (default `http://192.168.2.6:8643`), `hermes-api-model` (default `hermes-agent`), `mention-trigger` (default `hermes`), `hermes-model`, `max-turns` (default `30`), `prompt-path` (default `hermes-review-prompt.md`), `issue-prompt-path` (default `hermes-triage-prompt.md`).
 - **Runner requirement:** a `self-hosted` runner with `gh`, `curl`, and `python3` on PATH (no hermes install needed).
 - **hermes-01 requirement:** the `review-bot` profile API server must be running and reachable from the runner — started with `hermes -p review-bot gateway`, with `API_SERVER_HOST` bound to the LAN interface (not `127.0.0.1`), `API_SERVER_PORT` set, and `API_SERVER_KEY` configured (that's `HERMES_API_KEY`).
-- **Expects:** a GitHub App installed on the calling repo with `Contents:Write` (open PRs), `Pull requests:Read&write`, `Checks:Read&write`, `Issues:Write` (triage). Triggering is **Actions-driven** (the *calling* repo defines `on: issue_comment` / `pull_request_review_comment`), so the App does **not** need to subscribe to those webhook events — that's handled by GitHub Actions, not the App.
+- **Expects:** a GitHub App installed on the calling repo with `Contents:Write` (open PRs), `Pull requests:Read&write`, `Checks:Read&write`, `Issues:Write` (triage). Triggering is **Actions-driven** (the *calling* repo defines `on: issue_comment` only — see the example). Do **not** subscribe to `pull_request_review_comment` / `pull_request_review`: a submitted review fires those events and review bodies routinely contain the `@<slug>` string, which re-triggers this workflow with no human summon (the Claude→Hermes cascade on s3ntin3l8/.github#527). `issue_comment` alone covers both PR-conversation and issue mentions.
 
 > **`@<slug>` mention trigger:** comment `@s3ntin3l8-hermes` on a PR (or reply to a review
 > comment) for a diff review, or on an issue for triage. The mention string is set via the
@@ -103,13 +103,14 @@ centralized-prompt, reusable design. See [`s3ntin3l8/.github` #18](https://githu
 
 ### Full caller example (on-demand, "@<slug>" mention on PRs or issues)
 ```yaml
-name: Hermes (on-demand)
-on:
-  issue_comment:
-    types: [created]
-  pull_request_review_comment:
-    types: [created]
-
+|name: Hermes (on-demand)
+|on:
+|  issue_comment:
+|    types: [created]
+|  # NOTE: do NOT add pull_request_review_comment here — a submitted review
+|  # fires that event, and review bodies can contain "@<slug>", re-triggering
+|  # this workflow with no human summon (see .github#527).
+|
 jobs:
   hermes:
     # Only fire for comment events from a human (the bot never re-triggers itself).
