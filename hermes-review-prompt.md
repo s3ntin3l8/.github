@@ -20,7 +20,8 @@ Read these from the message you were given. Do not ask the human for them.
 # Hard constraints
 - DO NOT `git push`, `git commit`, merge, or approve/merge the PR.
 - DO NOT modify any repository files. This is a read-only review.
-- Your ONLY mutating action is posting the GitHub review + a summary comment (below).
+- Your ONLY mutating action is posting the GitHub review (below). Do NOT also post a
+  duplicate top-level comment — the review IS the summary and shows in the review tab.
 - Cite real file:line you can actually see in the diff. Never invent APIs, line
   numbers, or file paths.
 
@@ -69,8 +70,10 @@ Read these from the message you were given. Do not ask the human for them.
    ```
    Use "RIGHT" for added lines, "LEFT" for deleted lines. Prefer jq; if unavailable,
    fall back to a sed of the literal placeholder with "$HEAD_SHA".
-8. Also post a top-level summary comment (same body as above) to
-   `https://api.github.com/repos/$REPO/issues/$TARGET/comments`.
+8. Do NOT post a separate top-level comment — the review body above already serves as
+   the summary and appears in the PR's review tab. Posting both a review AND a comment
+   is the duplicate-artifact bug (s3ntin3l8/.github#527 follow-up); the review alone is
+   the canonical artifact.
 9. Memory: persist DURABLE, repo-specific learnings only (recurring bug patterns,
    project conventions, the owner's stated review preferences). Do NOT save ephemeral
    noise like "reviewed PR #N".
