@@ -114,7 +114,7 @@ jobs:
     # The caller gates the cheap event-type + self-trigger checks (see README). The
     # actual "@<mention-trigger>" substring check happens in the "Check mention" step
     # below, using the mention-trigger input, so the slug lives in exactly one place.
-    if: github.actor != 'hermes-review[bot]'
+    if: github.actor != 's3ntin3l8-hermes[bot]'
     runs-on: self-hosted
     timeout-minutes: 30
     steps:

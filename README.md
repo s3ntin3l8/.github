@@ -77,7 +77,7 @@ Checks for vulnerable dependencies and license policy violations in PRs.
 
 ### [Hermes-Review](.github/workflows/hermes-review.yml)
 AI agent (a **local Hermes instance** on your self-hosted runner, sharing the
-`review-bot` profile's persistent memory + skills) that acts on **`@hermes` mentions**
+`review-bot` profile's persistent memory + skills) that acts on **`@s3ntin3l8-hermes` mentions**
 — posted to the PR or issue by a human. No internet exposure: the event reaches the
 runner over its outbound connection and Hermes is called on localhost; the only
 outbound call is the App-token-authed POST back to GitHub.
@@ -93,10 +93,10 @@ outbound call is the App-token-authed POST back to GitHub.
 - **Runner requirement:** a `self-hosted` runner with `hermes` on PATH; the `review-bot` profile must exist on it (create once with `hermes profile create review-bot --clone`).
 - **Expects:** a GitHub App installed on the calling repo with `Contents:Write` (open PRs), `Pull requests:Read&write`, `Checks:Read&write`, `Issues:Write` (triage); subscribe to *Issue comment* and *Pull request review comment* events.
 
-> **`@<slug>` mention trigger:** comment `@s3ntin3l8-s-hermes` on a PR (or reply to a review
+> **`@<slug>` mention trigger:** comment `@s3ntin3l8-hermes` on a PR (or reply to a review
 > comment) for a diff review, or on an issue for triage. The mention string is set via the
 > `mention-trigger` input (defaults to `hermes`; set it to your App slug, e.g.
-> `s3ntin3l8-s-hermes`). The bot is guarded against re-triggering itself.
+> `s3ntin3l8-hermes`). The bot is guarded against re-triggering itself.
 
 ### Full caller example (on-demand, "@<slug>" mention on PRs or issues)
 ```yaml
@@ -112,7 +112,7 @@ jobs:
     # Only fire for comment events from a human (the bot never re-triggers itself).
     # The actual "@<slug>" mention check is done inside the reusable workflow via the
     # `mention-trigger` input, so the slug lives in exactly one place.
-    if: github.actor != 'hermes-review[bot]'
+    if: github.actor != 's3ntin3l8-hermes[bot]'
     permissions:
       contents: write
       pull-requests: write
@@ -120,7 +120,7 @@ jobs:
       checks: write
     uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
     with:
-      mention-trigger: s3ntin3l8-s-hermes   # your GitHub App slug
+      mention-trigger: s3ntin3l8-hermes   # your GitHub App slug
     secrets: inherit
 ```
 
