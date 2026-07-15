@@ -86,7 +86,50 @@ a GitHub App token.
 - **Variables:** `HERMES_MODEL` (optional model override).
 - **Inputs:** `hermes-profile` (default `review-bot`), `hermes-model`, `max-turns` (default `30`), `prompt-path` (default `hermes-review-prompt.md`).
 - **Runner requirement:** a `self-hosted` runner with `hermes` on PATH; the `review-bot` profile must exist on it (create once with `hermes profile create review-bot --clone`).
-- **Expects:** a GitHub App with `Contents:Read`, `Pull requests:Read&write`, `Checks:Read&write`, subscribed to Pull request events, installed on the calling repo.
+- **Trigger-agnostic:** the job resolves the PR number from `pull_request`, `issue_comment`, or `pull_request_review_comment` events, so one reusable workflow serves both automatic reviews and `@hermes` mentions.
+- **Expects:** a GitHub App installed on the calling repo with `Contents:Read`, `Pull requests:Read&write`, `Checks:Read&write`; to let the bot **open PRs**, also grant `Contents:Write`, and to **manage issues** add `Issues:Write`. Subscribe to *Pull request*, *Issue comment*, and *Pull request review comment* events.
+
+> **`@hermes` mention trigger:** comment `@hermes` on a PR (or reply to a review comment) and the same workflow runs on-demand. Match the mention string to your App slug (e.g. `@hermes-review`). The bot is guarded against re-triggering itself.
+
+### Full caller example (auto + @hermes mention)
+```yaml
+name: Hermes Review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  hermes-review:
+    # Auto-review PRs, or respond to "@hermes" (never let the bot re-trigger itself).
+    if: >-
+      github.actor != 'hermes-review[bot]' && (
+        github.event_name == 'pull_request' ||
+        (github.event_name == 'issue_comment' && github.event.issue.pull_request != null
+          && contains(github.event.comment.body, '@hermes')) ||
+        (github.event_name == 'pull_request_review_comment'
+          && contains(github.event.comment.body, '@hermes'))
+      )
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
+    secrets: inherit
+```
+
+### Out-of-Actions bot identity (open PRs / triage from any Hermes session)
+The reusable workflow mints the App token *inside* Actions. To let your local
+`review-bot` profile, gateway, or a **cronjob** act as the App *outside* a workflow,
+use [`scripts/app-token.sh`](scripts/app-token.sh). It signs a JWT with the App's
+private key and exchanges it for an installation token, so any `gh` / REST call is
+attributed to `<slug>[bot]` — not your account. Each invocation mints a fresh token
+(1-hour max lifetime), so scheduled runs sidestep expiry entirely. Configure it once
+in the `review-bot` profile's `.env` (`HERMES_APP_ID`, `HERMES_APP_PRIVATE_KEY`,
+`HERMES_INSTALLATION_ID`) and call `export GITHUB_TOKEN="$(~/.hermes/scripts/app-token.sh)"`.
 
 ### Minimal caller example
 ```yaml

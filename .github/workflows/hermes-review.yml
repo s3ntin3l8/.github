@@ -10,9 +10,17 @@ name: Hermes PR Review (reusable)
 # calls Hermes on localhost. The only outbound API call is from `hermes` itself, using
 # the GitHub App token minted below, to POST the review.
 #
+# Triggers (define in the CALLING repo's workflow, not here — this is `workflow_call`):
+#   - pull_request:      opened / synchronize / reopened / ready_for_review  (auto review)
+#   - issue_comment:     created, body contains "@hermes"                    (mention)
+#   - pull_request_review_comment: created, body contains "@hermes"          (inline mention)
+# The PR number is resolved from whichever event fired, so the same job works for all.
+#
 # Required caller setup (once per calling repo):
 #   1. Register a GitHub App with permissions Contents:Read, Pull requests:Read&write,
-#      Checks:Read&write; subscribe to Pull request events; install on the repo.
+#      Checks:Read&write; subscribe to Pull request + Issue comment (+ Pull request
+#      review comment) events; install on the repo. To let the bot OPEN PRs / manage
+#      issues, also grant Contents:Write and Issues:Write (see "Expects" below).
 #   2. Repo secrets: HERMES_APP_ID, HERMES_APP_PRIVATE_KEY.
 #   3. Repo variable (optional): HERMES_MODEL (defaults to anthropic/claude-sonnet-4).
 #   4. A self-hosted runner labelled `self-hosted` with `hermes` on PATH.
@@ -21,7 +29,15 @@ name: Hermes PR Review (reusable)
 #
 # Minimal caller example (in the *calling* repo's .github/workflows/ci.yml):
 #   hermes-review:
-#     needs: [test]            # run after CI if you like
+#     # route auto + @hermes mention triggers (see README for the full snippet)
+#     if: >-
+#       github.actor != 'hermes-review[bot]' && (
+#         github.event_name == 'pull_request' ||
+#         (github.event_name == 'issue_comment' && github.event.issue.pull_request != null
+#           && contains(github.event.comment.body, '@hermes')) ||
+#         (github.event_name == 'pull_request_review_comment'
+#           && contains(github.event.comment.body, '@hermes'))
+#       )
 #     permissions:
 #       contents: read
 #       pull-requests: write
@@ -64,9 +80,8 @@ on:
 
 jobs:
   hermes-review:
-    if: >-
-      github.event.pull_request.draft == false &&
-      github.actor != 'hermes-review[bot]'
+    # Trigger-agnostic guard: never let the bot re-trigger itself when it posts.
+    if: github.actor != 'hermes-review[bot]'
     runs-on: self-hosted
     timeout-minutes: 30
     steps:
@@ -77,12 +92,28 @@ jobs:
           app-id: ${{ secrets.HERMES_APP_ID }}
           private-key: ${{ secrets.HERMES_APP_PRIVATE_KEY }}
 
+      # Resolve the PR number/head/base from whichever event fired. `issue_comment`
+      # and `pull_request_review_comment` events do NOT carry github.event.pull_request,
+      # so we look the PR up via the API. This makes one job serve every trigger.
+      - name: Resolve PR number / head / base
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          PR_NUM="${{ github.event.pull_request.number || github.event.issue.number || github.event.pull_request_review_comment.pull_request_number }}"
+          echo "number=$PR_NUM" >> "$GITHUB_OUTPUT"
+          PR_JSON=$(gh api "repos/$REPO/pulls/$PR_NUM")
+          echo "head=$(echo "$PR_JSON" | jq -r .head.sha)" >> "$GITHUB_OUTPUT"
+          echo "base=$(echo "$PR_JSON" | jq -r .base.ref)"  >> "$GITHUB_OUTPUT"
+
       # Checkout the CALLING repo (the PR lives here), so the review reads the diff.
       - name: Checkout PR head (caller repo)
         uses: actions/checkout@v4
         with:
           token: ${{ steps.app-token.outputs.token }}
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ steps.pr.outputs.head }}
           fetch-depth: 0
 
       # Checkout THIS shared repo to fetch the review prompt (read-only, no token needed).
@@ -96,7 +127,7 @@ jobs:
             ${{ inputs.prompt-path }}
 
       - name: Fetch base branch for diffing
-        run: git fetch origin ${{ github.event.pull_request.base.ref }}
+        run: git fetch origin ${{ steps.pr.outputs.base }}
 
       - name: Verify hermes is on PATH of this runner
         run: command -v hermes >/dev/null 2>&1 || { echo "::error::hermes not found on PATH of this self-hosted runner"; exit 1; }
@@ -104,10 +135,10 @@ jobs:
       - name: Run Hermes review (local instance, shared memory)
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
           REPO: ${{ github.repository }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ steps.pr.outputs.base }}
+          HEAD_SHA: ${{ steps.pr.outputs.head }}
           MODEL: ${{ inputs.hermes-model || vars.HERMES_MODEL || 'anthropic/claude-sonnet-4' }}
           PROFILE: ${{ inputs.hermes-profile }}
           PROMPT_FILE: .hermes-shared/${{ inputs.prompt-path }}
