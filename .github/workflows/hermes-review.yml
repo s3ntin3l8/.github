@@ -1,0 +1,121 @@
+name: Hermes PR Review (reusable)
+
+# Reusable workflow: any repo with a self-hosted runner that has `hermes` on PATH
+# can call this to get an AI code review posted back to the PR.
+#
+# The Hermes process runs LOCALLY on the caller's self-hosted runner — it calls the
+# `hermes` binary already installed there (ideally the `review-bot` profile), sharing
+# that profile's persistent memory + skills. NOTHING is exposed to the internet: the
+# GitHub event reaches the runner over its existing outbound connection, and the runner
+# calls Hermes on localhost. The only outbound API call is from `hermes` itself, using
+# the GitHub App token minted below, to POST the review.
+#
+# Required caller setup (once per calling repo):
+#   1. Register a GitHub App with permissions Contents:Read, Pull requests:Read&write,
+#      Checks:Read&write; subscribe to Pull request events; install on the repo.
+#   2. Repo secrets: HERMES_APP_ID, HERMES_APP_PRIVATE_KEY.
+#   3. Repo variable (optional): HERMES_MODEL (defaults to anthropic/claude-sonnet-4).
+#   4. A self-hosted runner labelled `self-hosted` with `hermes` on PATH.
+#   5. (Recommended) On the runner: `hermes profile create review-bot --clone`
+#      and `hermes config set approvals.mode off` for that profile.
+#
+# Minimal caller example (in the *calling* repo's .github/workflows/ci.yml):
+#   hermes-review:
+#     needs: [test]            # run after CI if you like
+#     permissions:
+#       contents: read
+#       pull-requests: write
+#       checks: write
+#     uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
+#     secrets: inherit
+
+on:
+  workflow_call:
+    secrets:
+      HERMES_APP_ID:
+        required: true
+        description: GitHub App numeric ID (from the App's settings page).
+      HERMES_APP_PRIVATE_KEY:
+        required: true
+        description: GitHub App PEM private key.
+    inputs:
+      hermes-profile:
+        required: false
+        type: string
+        default: review-bot
+        description: Hermes profile to run the review under (must exist on the runner).
+      hermes-model:
+        required: false
+        type: string
+        default: ''
+        description: >-
+          Model override (e.g. anthropic/claude-sonnet-4). Empty => falls back to the
+          repo variable HERMES_MODEL, then to the workflow default.
+      max-turns:
+        required: false
+        type: number
+        default: 30
+        description: Max agent turns for the review (guards against runaway runs).
+      prompt-path:
+        required: false
+        type: string
+        default: hermes-review-prompt.md
+        description: Path (relative to the shared/workflow repo root) of the review recipe.
+
+jobs:
+  hermes-review:
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.actor != 'hermes-review[bot]'
+    runs-on: self-hosted
+    timeout-minutes: 30
+    steps:
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.HERMES_APP_ID }}
+          private-key: ${{ secrets.HERMES_APP_PRIVATE_KEY }}
+
+      # Checkout the CALLING repo (the PR lives here), so the review reads the diff.
+      - name: Checkout PR head (caller repo)
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      # Checkout THIS shared repo to fetch the review prompt (read-only, no token needed).
+      - name: Checkout shared repo (prompt source)
+        uses: actions/checkout@v4
+        with:
+          repository: s3ntin3l8/.github
+          ref: main
+          path: .hermes-shared
+          sparse-checkout: |
+            ${{ inputs.prompt-path }}
+
+      - name: Fetch base branch for diffing
+        run: git fetch origin ${{ github.event.pull_request.base.ref }}
+
+      - name: Verify hermes is on PATH of this runner
+        run: command -v hermes >/dev/null 2>&1 || { echo "::error::hermes not found on PATH of this self-hosted runner"; exit 1; }
+
+      - name: Run Hermes review (local instance, shared memory)
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MODEL: ${{ inputs.hermes-model || vars.HERMES_MODEL || 'anthropic/claude-sonnet-4' }}
+          PROFILE: ${{ inputs.hermes-profile }}
+          PROMPT_FILE: .hermes-shared/${{ inputs.prompt-path }}
+          MAX_TURNS: ${{ inputs.max-turns }}
+        run: |
+          set -euo pipefail
+          [ -f "$PROMPT_FILE" ] || { echo "::error::prompt not found: $PROMPT_FILE"; exit 1; }
+          hermes -p "$PROFILE" -s github-code-review chat -Q --yolo \
+            -m "$MODEL" --max-turns "$MAX_TURNS" \
+            -t terminal,file,code_execution,memory \
+            -q "$(cat "$PROMPT_FILE")"

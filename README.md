@@ -75,6 +75,19 @@ Checks for vulnerable dependencies and license policy violations in PRs.
 - **Caller permissions:** `contents: read`.
 - **Inputs:** none.
 
+### [Hermes-Review](.github/workflows/hermes-review.yml)
+AI code review posted back to the PR by a **local Hermes instance** on your
+self-hosted runner (shares the `review-bot` profile's persistent memory + skills).
+No internet exposure: the event reaches the runner over its outbound connection
+and Hermes is called on localhost; the only outbound call is the review POST using
+a GitHub App token.
+- **Caller permissions (required):** `contents: read`, `pull-requests: write`, `checks: write`.
+- **Secrets:** `HERMES_APP_ID`, `HERMES_APP_PRIVATE_KEY` (required) — pass via `secrets: inherit`.
+- **Variables:** `HERMES_MODEL` (optional model override).
+- **Inputs:** `hermes-profile` (default `review-bot`), `hermes-model`, `max-turns` (default `30`), `prompt-path` (default `hermes-review-prompt.md`).
+- **Runner requirement:** a `self-hosted` runner with `hermes` on PATH; the `review-bot` profile must exist on it (create once with `hermes profile create review-bot --clone`).
+- **Expects:** a GitHub App with `Contents:Read`, `Pull requests:Read&write`, `Checks:Read&write`, subscribed to Pull request events, installed on the calling repo.
+
 ### Minimal caller example
 ```yaml
 jobs:
