@@ -60,6 +60,14 @@ on:
         type: string
         default: review-bot
         description: Hermes profile to run the review under (must exist on the runner).
+      hermes-binary:
+        required: false
+        type: string
+        default: /home/bjoern/hermes-agent/venv/bin/hermes
+        description: >-
+          Absolute path to the `hermes` binary on the runner. Use an absolute path so
+          a separate runner service account (which may not inherit your login PATH)
+          cannot fail to find it. Override if your runner installs hermes elsewhere.
       hermes-model:
         required: false
         type: string
@@ -129,8 +137,10 @@ jobs:
       - name: Fetch base branch for diffing
         run: git fetch origin ${{ steps.pr.outputs.base }}
 
-      - name: Verify hermes is on PATH of this runner
-        run: command -v hermes >/dev/null 2>&1 || { echo "::error::hermes not found on PATH of this self-hosted runner"; exit 1; }
+      - name: Verify hermes binary exists on this runner
+        run: |
+          HERMES_BIN="${{ inputs.hermes-binary }}"
+          [ -x "$HERMES_BIN" ] || { echo "::error::hermes binary not executable at: $HERMES_BIN"; exit 1; }
 
       - name: Run Hermes review (local instance, shared memory)
         env:
@@ -143,10 +153,11 @@ jobs:
           PROFILE: ${{ inputs.hermes-profile }}
           PROMPT_FILE: .hermes-shared/${{ inputs.prompt-path }}
           MAX_TURNS: ${{ inputs.max-turns }}
+          HERMES_BIN: ${{ inputs.hermes-binary }}
         run: |
           set -euo pipefail
           [ -f "$PROMPT_FILE" ] || { echo "::error::prompt not found: $PROMPT_FILE"; exit 1; }
-          hermes -p "$PROFILE" -s github-code-review chat -Q --yolo \
+          "$HERMES_BIN" -p "$PROFILE" -s github-code-review chat -Q --yolo \
             -m "$MODEL" --max-turns "$MAX_TURNS" \
             -t terminal,file,code_execution,memory \
             -q "$(cat "$PROMPT_FILE")"
