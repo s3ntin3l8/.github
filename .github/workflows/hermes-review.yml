@@ -78,11 +78,12 @@ on:
       hermes-api-url:
         required: false
         type: string
-        default: http://192.168.2.6:8642
+        default: http://192.168.2.6:8643
         description: >-
           Base URL of the Hermes API server (review-bot profile) on hermes-01. Must be
-          reachable from the runner over the LAN; bind API_SERVER_HOST to the LAN iface,
-          not 127.0.0.1.
+          reachable from the runner over the LAN; bind API_SERVER_HOST to the LAN iface
+          (not 127.0.0.1). The review-bot server runs on its own port (8643) to avoid
+          colliding with the default-profile gateway (8642).
       hermes-api-model:
         required: false
         type: string
