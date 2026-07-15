@@ -135,7 +135,11 @@ private key and exchanges it for an installation token, so any `gh` / REST call 
 attributed to `<slug>[bot]` — not your account. Each invocation mints a fresh token
 (1-hour max lifetime), so scheduled runs sidestep expiry entirely. Configure it once
 in the `review-bot` profile's `.env` (`HERMES_APP_ID`, `HERMES_APP_PRIVATE_KEY`,
-`HERMES_INSTALLATION_ID`) and call `export GITHUB_TOKEN="$(~/.hermes/scripts/app-token.sh)"`.
+`HERMES_INSTALLATION_ID`) and call `export GITHUB_TOKEN="$(~/.h....sh)"`.
+**This is a required setup step — the App credentials are NOT in the profile by default;**
+you must add `HERMES_APP_ID` + `HERMES_APP_PRIVATE_KEY` (and `HERMES_INSTALLATION_ID` if you
+installed the App on more than one account/org) to `~/.hermes/profiles/review-bot/.env` on
+`hermes-01`, plus copy `scripts/app-token.sh` to `~/.h....sh`.
 
 ### Minimal caller example
 ```yaml
