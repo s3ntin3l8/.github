@@ -227,7 +227,16 @@ jobs:
       # Guard against (a) the bot re-triggering on its own output and (b) a human
       # reply that merely @mentions the slug without intending a new run. If the bot
       # has ALREADY acted on this exact target, skip — do NOT run again.
+      # IMPORTANT: this step sets a `skip` output, exactly like `check-mention` above.
+      # Both downstream steps ("Checkout shared repo", "Run Hermes") gate on
+      # `steps.guard.outputs.skip != 'true'` IN ADDITION TO check-mention's skip. A
+      # bare `exit 0` in this step's own script only ends ITS script, not the job —
+      # without the explicit output + downstream `if:`, a detected prior review never
+      # actually stopped anything (confirmed via claude-remote-session PR #13, run
+      # 29513281105: this step logged "already acted ... skipping re-trigger" and the
+      # job relayed a 3rd request to hermes-01 anyway).
       - name: Guard against re-trigger
+        id: guard
         if: steps.check-mention.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -247,7 +256,9 @@ jobs:
           fi
           if [[ "${COUNT:-0}" != "0" ]]; then
             echo "::notice::bot already acted on $KIND #$NUMBER ($COUNT prior) — skipping re-trigger."
-            exit 0   # not a failure: leave the run green
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
       # Checkout THIS shared repo to fetch the prompt(s) (read-only, no token needed).
@@ -255,7 +266,7 @@ jobs:
       # patterns — bare filenames like "hermes-review-prompt.md" are rejected
       # ("not a directory"). Disable cone mode so file paths work.
       - name: Checkout shared repo (prompt source)
-        if: steps.check-mention.outputs.skip != 'true'
+        if: steps.check-mention.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           repository: s3ntin3l8/.github
@@ -277,7 +288,7 @@ jobs:
       # (timeouts, RemoteDisconnected) is expected for a long async run and is ignored.
       - name: Run Hermes (remote agent on hermes-01)
         id: run
-        if: steps.check-mention.outputs.skip != 'true'
+        if: steps.check-mention.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
         env:
           API_URL: ${{ inputs.hermes-api-url }}
           API_KEY: ${{ secrets.HERMES_API_KEY }}
