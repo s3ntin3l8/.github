@@ -180,8 +180,14 @@ jobs:
           IS_PR_COMMENT="${{ github.event.issue.pull_request != null && github.event_name == 'issue_comment' }}"
           IS_PR_REVIEW="${{ github.event_name == 'pull_request_review_comment' }}"
           if [[ "$IS_PR_COMMENT" == "true" || "$IS_PR_REVIEW" == "true" ]]; then
-            # For a PR comment/review-comment, the PR number is authoritative.
-            PR_NUM="${{ github.event.issue.pull_request.number || github.event.pull_request.number || github.event.pull_request_review_comment.pull_request_number }}"
+            # For a PR comment (issue_comment on a PR) the PR number is the issue
+            # number itself: github.event.issue.number. NOTE: github.event.issue.
+            # pull_request is an OBJECT (URLs only) with NO .number, so
+            # github.event.issue.pull_request.number resolves EMPTY — do NOT use it
+            # (that was the bug: PR_NUM came back blank and the agent fell back to
+            # "most recent PR", s3ntin3l8/.github review from a second agent).
+            # For pull_request_review_comment, the number lives on the review object.
+            PR_NUM="${{ github.event.issue.number || github.event.pull_request_review_comment.pull_request.number }}"
             echo "kind=pr"         >> "$GITHUB_OUTPUT"
             echo "number=$PR_NUM" >> "$GITHUB_OUTPUT"
           else
