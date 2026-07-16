@@ -107,7 +107,10 @@ on:
           Mention substring that triggers the bot (without the leading @). Defaults to
           "hermes". Set this to your GitHub App slug so comments like "@<slug>" fire the
           workflow — e.g. "s3ntin3l8-hermes". The reusable job's "Check mention" step
-          enforces it, so the slug lives in exactly one place (the caller's with:).
+          enforces it, so the slug lives in exactly one place (the caller's with:). Also
+          used to scope the re-trigger guard to this workflow's own bot login
+          (`<mention-trigger>[bot]`), so other bots (e.g. CodeQL) reviewing the same
+          target don't falsely count as "already acted".
       mode:
         required: false
         type: string
@@ -118,7 +121,10 @@ on:
           the workflow (e.g. a caller using `pull_request: [opened]`) with no mention
           needed — the caller's `on:` decides when to run. Both modes share the same
           relay + prompt; auto mode skips the mention check and resolves the PR number
-          from github.event.pull_request.
+          from github.event.pull_request. The re-trigger guard (anti-push-spam) only
+          applies in auto mode — an on-demand "@mention" is itself the human's explicit
+          request for a fresh review and is never skipped just because something already
+          reviewed the target before.
       hermes-model:
         required: false
         type: string
@@ -224,38 +230,50 @@ jobs:
             echo "number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
           fi
 
-      # Guard against (a) the bot re-triggering on its own output and (b) a human
-      # reply that merely @mentions the slug without intending a new run. If the bot
-      # has ALREADY acted on this exact target, skip — do NOT run again.
+      # Guard against the bot re-triggering itself via a spammy sequence of pushes in
+      # AUTO MODE ONLY (mode: auto — e.g. successive `synchronize` events on a PR the
+      # bot already auto-reviewed). This intentionally does NOT apply in on-demand
+      # mode: an explicit "@<mention-trigger>" comment is the human's deliberate,
+      # in-the-moment request for a fresh review, and must never be silently
+      # no-op'd just because *something* already reviewed the target before — that
+      # defeats the entire on-demand feature (confirmed dead-on-arrival behavior on
+      # claude-remote-session#13: a fresh mention would run "Check mention", pass,
+      # then silently skip here, looking successful while posting nothing).
+      #
+      # Scoped to THIS workflow's own bot login (`<mention-trigger>[bot]`), not any
+      # bot — matching ANY "[bot]"-suffixed login previously let unrelated reviews
+      # (e.g. github-advanced-security[bot]/CodeQL) count as "already acted",
+      # permanently disabling this guard's target bot on any repo with CodeQL enabled.
+      #
       # IMPORTANT: this step sets a `skip` output, exactly like `check-mention` above.
       # Both downstream steps ("Checkout shared repo", "Run Hermes") gate on
-      # `steps.guard.outputs.skip != 'true'` IN ADDITION TO check-mention's skip. A
-      # bare `exit 0` in this step's own script only ends ITS script, not the job —
-      # without the explicit output + downstream `if:`, a detected prior review never
-      # actually stopped anything (confirmed via claude-remote-session PR #13, run
-      # 29513281105: this step logged "already acted ... skipping re-trigger" and the
-      # job relayed a 3rd request to hermes-01 anyway).
-      - name: Guard against re-trigger
+      # `steps.guard.outputs.skip != 'true'` IN ADDITION TO check-mention's skip. When
+      # this step doesn't run at all (on-demand mode, `if:` false), its output is
+      # empty, and empty != 'true' is true, so downstream steps proceed normally.
+      - name: Guard against re-trigger (auto mode only)
         id: guard
-        if: steps.check-mention.outputs.skip != 'true'
+        if: steps.check-mention.outputs.skip != 'true' && inputs.mode == 'auto'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
           KIND: ${{ steps.target.outputs.kind }}
           NUMBER: ${{ steps.target.outputs.number }}
+          BOT_LOGIN: ${{ inputs.mention-trigger }}[bot]
         run: |
           set -euo pipefail
           if [[ "$KIND" == "pr" ]]; then
-            # Already posted a review on this PR by the bot? -> skip.
+            # Already posted a (non-dismissed) review on this PR by THIS bot? -> skip.
             COUNT=$(gh api "repos/$REPO/pulls/$NUMBER/reviews" \
-              --jq '[.[] | select(.user.type == "Bot" or (.user.login | endswith("[bot]")))] | length' 2>/dev/null || echo 0)
+              --jq --arg bot "$BOT_LOGIN" \
+              '[.[] | select(.user.login == $bot and .state != "DISMISSED")] | length' 2>/dev/null || echo 0)
           else
-            # Already commented on this issue by the bot? -> skip.
+            # Already commented on this issue by THIS bot? -> skip.
             COUNT=$(gh api "repos/$REPO/issues/$NUMBER/comments" \
-              --jq '[.[] | select(.user.type == "Bot" or (.user.login | endswith("[bot]")))] | length' 2>/dev/null || echo 0)
+              --jq --arg bot "$BOT_LOGIN" \
+              '[.[] | select(.user.login == $bot)] | length' 2>/dev/null || echo 0)
           fi
           if [[ "${COUNT:-0}" != "0" ]]; then
-            echo "::notice::bot already acted on $KIND #$NUMBER ($COUNT prior) — skipping re-trigger."
+            echo "::notice::$BOT_LOGIN already acted on $KIND #$NUMBER ($COUNT prior) — skipping re-trigger."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
