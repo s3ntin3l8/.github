@@ -105,6 +105,13 @@ on:
         required: false
         type: boolean
         default: false
+      format-check-script:
+        description: >-
+          npm script for format checking (e.g. 'format:check'). Empty string (the
+          default) skips the step entirely. Pass 'format:check' to opt in.
+        required: false
+        type: string
+        default: ''
     secrets:
       CODECOV_TOKEN:
         required: false
@@ -213,6 +220,17 @@ jobs:
             npm run lint
           else
             echo "No lint script defined; skipping."
+          fi
+      - name: Format check
+        if: ${{ inputs.format-check-script != '' }}
+        env:
+          FORMAT_CHECK_SCRIPT: ${{ inputs.format-check-script }}
+        run: |
+          fc_val=$(npm pkg get "scripts.$FORMAT_CHECK_SCRIPT")
+          if [ "$fc_val" = "{}" ] || [ -z "$fc_val" ]; then
+            echo "No '$FORMAT_CHECK_SCRIPT' script defined; skipping."
+          else
+            npm run "$FORMAT_CHECK_SCRIPT"
           fi
       - name: Typecheck
         if: ${{ inputs.typecheck-script != '' }}
