@@ -50,7 +50,7 @@ Read these from the message you were given. Do not ask the human for them.
 7. POST the review. Write JSON to a file to avoid shell-quoting pain, then inject
    the HEAD SHA with jq:
    ```bash
-   cat > /tmp/review.json <<'JSON'
+   cat > /tmp/review-$TARGET/review.json <<'JSON'
    {
      "commit_id": "__HEAD_SHA__",
      "event": "REQUEST_CHANGES",
@@ -60,12 +60,12 @@ Read these from the message you were given. Do not ask the human for them.
      ]
    }
    JSON
-   jq --arg sha "$HEAD_SHA" '.commit_id = $sha' /tmp/review.json > /tmp/review.final.json
+   jq --arg sha "$HEAD_SHA" '.commit_id = $sha' /tmp/review-$TARGET/review.json > /tmp/review-$TARGET/review.final.json
    curl -s -X POST \
      -H "Authorization: Bearer ***" \
      -H "Accept: application/vnd.github+json" \
      -H "X-GitHub-Api-Version: 2022-11-28" \
-     --data @/tmp/review.final.json \
+     --data @/tmp/review-$TARGET/review.final.json \
      https://api.github.com/repos/$REPO/pulls/$TARGET/reviews
    ```
    Use "RIGHT" for added lines, "LEFT" for deleted lines. Prefer jq; if unavailable,
