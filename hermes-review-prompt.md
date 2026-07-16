@@ -65,7 +65,7 @@ Read these from the message you were given. Do not ask the human for them.
      -H "Authorization: Bearer ***" \
      -H "Accept: application/vnd.github+json" \
      -H "X-GitHub-Api-Version: 2022-11-28" \
-     --data @/tmp/review.final.json \
+     --data @/tmp/review-$TARGET/review.final.json \
      https://api.github.com/repos/$REPO/pulls/$TARGET/reviews
    ```
    Use "RIGHT" for added lines, "LEFT" for deleted lines. Prefer jq; if unavailable,
