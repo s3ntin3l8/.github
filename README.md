@@ -111,22 +111,49 @@ centralized-prompt, reusable design. See [`s3ntin3l8/.github` #18](https://githu
 |  # fires that event, and review bodies can contain "@<slug>", re-triggering
 |  # this workflow with no human summon (see .github#527).
 |
-jobs:
-  hermes:
-    # Only fire for comment events from a human (the bot never re-triggers itself).
-    # The actual "@<slug>" mention check is done inside the reusable workflow via the
-    # `mention-trigger` input, so the slug lives in exactly one place.
-    if: github.actor != 's3ntin3l8-hermes[bot]'
-    permissions:
-      contents: write
-      pull-requests: write
-      issues: write
-      checks: write
-    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
-    with:
-      mention-trigger: s3ntin3l8-hermes   # your GitHub App slug
-    secrets: inherit
-```
+|jobs:
+|  hermes:
+|    # Only fire for comment events from a human (the bot never re-triggers itself).
+|    # The actual "@<slug>" mention check is done inside the reusable workflow via the
+|    # `mention-trigger` input, so the slug lives in exactly one place.
+|    if: github.actor != 's3ntin3l8-hermes[bot]'
+|    permissions:
+|      contents: write
+|      pull-requests: write
+|      issues: write
+|      checks: write
+|    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
+|    with:
+|      mention-trigger: s3ntin3l8-hermes   # your GitHub App slug
+|    secrets: inherit
+|```
+
+### Full caller example (auto — review every new PR, no mention needed)
+```yaml
+|name: Hermes (auto review)
+|on:
+|  pull_request:
+|    types: [opened, synchronize]
+|    # `opened` => review once when a PR is opened. Add `synchronize` to also
+|    # re-review on every push to the PR (the reusable workflow's "already reviewed"
+|    # guard skips repeats, so it effectively re-reviews only after you dismiss the
+|    # prior review). Add `if: github.event.pull_request.draft == false` to skip drafts.
+|
+|jobs:
+|  hermes:
+|    # The bot never re-triggers itself (its own review/push won't restart this).
+|    if: github.actor != 's3ntin3l8-hermes[bot]'
+|    permissions:
+|      contents: write
+|      pull-requests: write
+|      issues: write
+|      checks: write
+|    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
+|    with:
+|      mode: auto                      # <-- skips the mention check, reviews on trigger
+|      mention-trigger: s3ntin3l8-hermes
+|    secrets: inherit
+|```
 
 ### Out-of-Actions bot identity (open PRs / triage from any Hermes session)
 The reusable workflow mints the App token *inside* Actions. To let your local
