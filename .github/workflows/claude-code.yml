@@ -43,6 +43,26 @@ name: Claude Code (reusable)
 # prompt below has Claude build that payload directly via `gh api` instead of using the
 # action's tool -- one clean review object instead of several.
 #
+# WHY THERE'S A "Checkout PR branch" STEP: agent mode does ZERO automatic git setup of
+# its own (confirmed in src/modes/agent/index.ts -- no fetch, no checkout, no branch
+# switch; it relies entirely on whatever the calling workflow already prepared). Our own
+# `actions/checkout` step only checks out `main` (the default ref for issue_comment
+# events) -- never the PR's actual branch. Compare tag mode, which calls its own
+# internal setupBranch() (src/github/operations/branch.ts) to `git fetch origin --depth
+# <N> <branch>` + `git checkout <branch>` BEFORE Claude ever runs, so tag mode's Claude
+# always has the PR's real files sitting locally and can just Read() them or run small
+# per-file `git diff` commands. Without this, PR-mode Claude was stranded on `main` with
+# no local view of the PR's changes -- forcing it to pull one giant `gh pr diff` blob
+# and slice it with awk/sed/python3 pipelines, which then hit the Bash tool's
+# multi-operation rejection (none of those were granted) and burned enough turns that a
+# large multi-file PR (s3ntin3l8/pocket-portfolio-tracker#564) never got a review posted
+# at all -- confirmed via show_full_output logs (no gh api .../reviews call ever
+# appears in the trace). `gh pr checkout <N>` is the standard, fork-aware equivalent of
+# tag mode's setupBranch(): fetches + checks out the PR's head branch in one command.
+# This also fixes implementation requests (prompt step 5): without an actual checkout of
+# the PR branch, any `git commit`+push would have landed on `main`, not the PR -- a
+# second, latent bug this same fix resolves.
+#
 # Triggers (define in the CALLING repo's workflow, not here -- this is `workflow_call`,
 # same convention as hermes-review.yml in this repo). Typical caller `on:`:
 #   issue_comment: [created]
@@ -161,6 +181,17 @@ jobs:
             echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
           fi
 
+      # See the top-of-file comment on why this step exists -- agent mode does no git
+      # setup of its own, so without this Claude would be stranded on `main`.
+      - name: Checkout PR branch
+        if: >
+          github.event_name == 'pull_request_review_comment' ||
+          github.event_name == 'pull_request_review' ||
+          (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr checkout ${{ steps.pr.outputs.number }}
+
       # PR-attached mention: agent mode (see the top-of-file comment for why). Handles
       # both review/feedback AND implementation requests -- full parity with what tag
       # mode does on issues, minus tag mode's false "cannot submit reviews" framing.
@@ -193,10 +224,15 @@ jobs:
             ---
 
             Steps:
-            1. Run `gh pr view ${{ steps.pr.outputs.number }}` and
-               `gh pr diff ${{ steps.pr.outputs.number }}` to see the PR description and
-               full diff (the local checkout is shallow -- use these instead of local
-               `git diff`). Read CLAUDE.md and other relevant files for repo conventions.
+            1. Your local checkout is already on this PR's actual branch. Get an
+               overview with `git diff origin/main...HEAD --stat`, then look at
+               specific files one at a time with `git diff origin/main...HEAD -- <file>`
+               or the Read tool on the file itself -- much easier to work with than one
+               giant diff dump. Run `gh pr view ${{ steps.pr.outputs.number }}` for the
+               PR description. Read CLAUDE.md and other relevant files for repo
+               conventions. (`gh pr diff ${{ steps.pr.outputs.number }}` is available
+               too if you want the whole diff at once, but prefer the per-file approach
+               above for anything beyond a tiny PR.)
             2. Classify the request: review/feedback, a question, an implementation
                request, or a mix -- handle accordingly, combining as needed.
             3. For review/feedback with specific line-level findings, post ONE clean
@@ -205,13 +241,17 @@ jobs:
                   `gh pr view ${{ steps.pr.outputs.number }} --json headRefOid -q .headRefOid`
                b. Write a JSON file shaped like this (one entry per finding; include a
                   GitHub ```suggestion``` code block inside a comment's body whenever
-                  you're proposing a concrete edit, so it can be applied with one click):
+                  you're proposing a concrete edit, so it can be applied with one click).
+                  Structure the "body" field like this (matches the format this org's
+                  other review bot already uses, so both read consistently -- omit a
+                  section's bullet and write "- None" if empty, but keep the heading):
+                  "## Review\n\n**Verdict:** <one-line summary>\n\n### Critical\n- <blocking issues, or \"None\">\n\n### Warnings\n- <non-blocking issues worth fixing, or \"None\">\n\n### Suggestions\n- <optional improvements, or \"None\">\n\n### Looks Good\n- <what's solid about this change>"
                   {
                     "commit_id": "<head sha>",
-                    "body": "<overall summary of your findings>",
+                    "body": "<the structured body above>",
                     "event": "COMMENT",
                     "comments": [
-                      {"path": "<file>", "line": <line>, "body": "<finding>"}
+                      {"path": "<file>", "line": <line>, "body": "<finding, specific and under ~280 chars>"}
                     ]
                   }
                   Use `"event": "REQUEST_CHANGES"` instead of `"COMMENT"` if something
@@ -227,25 +267,30 @@ jobs:
             4. For questions or feedback with no specific line to anchor to, post via
                `gh pr comment ${{ steps.pr.outputs.number }} --body "..."`.
             5. For implementation requests: edit files locally with your file tools,
-               then stage/commit/push to the existing PR branch with git commands via
-               Bash, then post a summary of what changed with `gh pr comment`.
+               then stage/commit/push with git commands via Bash (you're already on the
+               PR's branch, so a plain push lands on it directly), then post a summary
+               of what changed with `gh pr comment`.
             6. This is the ONLY way your response reaches the user -- nothing else is
                visible. Never approve/merge/close the PR beyond what's explicitly
                requested.
 
+          # `Bash(git diff:*)`/`Bash(git log:*)` are what the "Checkout PR branch" step
+          # above enables -- small, per-file local diffs instead of one giant remote
+          # blob that needs shell-pipeline slicing (the thing that starved
+          # pocket-portfolio-tracker#564 of turns and never posted a review at all).
           # gh pr diff / gh pr view / gh pr comment are lifted directly from Anthropic's
           # own examples/pr-review-comprehensive.yml -- the read/comment channels this
-          # prompt relies on since agent mode does no automatic context-gathering or
-          # comment posting. `Bash(gh api:*)` (broad trailing wildcard, matching this
-          # file's established convention -- see the note on exact-string rules below)
-          # is what the single-review-call step above needs; scoped tighter patterns
-          # like "gh api repos/*/pulls/*/reviews*" risk NOT matching if the permission
+          # prompt relies on since agent mode does no automatic comment posting.
+          # `Bash(gh api:*)` (broad trailing wildcard, matching this file's established
+          # convention -- see the note on exact-string rules below) is what the
+          # single-review-call step above needs; scoped tighter patterns like
+          # "gh api repos/*/pulls/*/reviews*" risk NOT matching if the permission
           # matcher doesn't support mid-string globs, which silently denies the call
           # with no human to fall back on in CI. `gh pr review` stays granted as the
           # prompt's own explicit fallback. Read/Glob/Grep are included explicitly since
           # agent mode may not carry tag mode's baseline tool defaults.
           claude_args: |
-            --allowedTools "Bash(gh api:*)" "Bash(gh pr review:*)" "Bash(gh pr diff:*)" "Bash(gh pr view:*)" "Bash(gh pr comment:*)" "Bash(git add:*)" "Bash(git commit:*)" "Bash(git rm:*)" "Bash(git push:*)" "Read" "Glob" "Grep" ${{ inputs.build-tools }}
+            --allowedTools "Bash(gh api:*)" "Bash(gh pr review:*)" "Bash(gh pr diff:*)" "Bash(gh pr view:*)" "Bash(gh pr comment:*)" "Bash(git diff:*)" "Bash(git log:*)" "Bash(git status:*)" "Bash(git add:*)" "Bash(git commit:*)" "Bash(git rm:*)" "Bash(git push:*)" "Read" "Glob" "Grep" ${{ inputs.build-tools }}
 
       # Issue-only mention: unchanged tag mode, exactly as before this fix -- issues
       # have no "cannot review a PR" problem to escape, so no reason to touch this path.
