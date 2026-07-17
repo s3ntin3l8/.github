@@ -313,7 +313,10 @@ jobs:
                d. If that call fails for any reason, fall back to
                   `gh pr review --comment` or `--request-changes` with your findings
                   written out in the body instead -- a working verdict without inline
-                  anchors beats no response at all.
+                  anchors beats no response at all. Pick between them with the same rule
+                  as above: `--request-changes` iff you have a real Critical finding,
+                  `--comment` otherwise -- this fallback must not become a second place
+                  where that choice drifts back to unaided judgment.
             4. For questions or feedback with no specific line to anchor to, post via
                `gh pr comment ${{ steps.pr.outputs.number }} --body "..."`.
             5. For implementation requests: edit files locally with your file tools,
