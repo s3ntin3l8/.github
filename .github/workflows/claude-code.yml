@@ -30,6 +30,19 @@ name: Claude Code (reusable)
 # issue-only events (issues, issue_comment on a non-PR issue) are left running in tag
 # mode exactly as before -- there's no "cannot review a PR" problem to escape there.
 #
+# WHY THE PR PROMPT USES `gh api .../reviews` INSTEAD OF THE mcp__github_inline_comment
+# TOOL: the first agent-mode version used mcp__github_inline_comment__create_inline_comment
+# for line-anchored feedback. It worked (inline comments posted correctly), but the
+# action's own src/entrypoints/post-buffered-inline-comments.ts posts each buffered
+# comment with a SEPARATE octokit.rest.pulls.createReviewComment call in a plain loop --
+# no batching, no pending-review object -- so N inline comments produce N separate
+# single-comment reviews, plus a further +1 from our own explicit `gh pr review` verdict
+# call. That's hardcoded in the action's shipped code; no prompt can change it. GitHub's
+# REST API itself supports inline comments AND a verdict in ONE atomic call
+# (`POST /pulls/{pr}/reviews` takes a `comments` array plus `body`/`event`), so the
+# prompt below has Claude build that payload directly via `gh api` instead of using the
+# action's tool -- one clean review object instead of several.
+#
 # Triggers (define in the CALLING repo's workflow, not here -- this is `workflow_call`,
 # same convention as hermes-review.yml in this repo). Typical caller `on:`:
 #   issue_comment: [created]
@@ -186,14 +199,31 @@ jobs:
                `git diff`). Read CLAUDE.md and other relevant files for repo conventions.
             2. Classify the request: review/feedback, a question, an implementation
                request, or a mix -- handle accordingly, combining as needed.
-            3. For review/feedback: post specific, line-anchored comments with the
-               mcp__github_inline_comment__create_inline_comment tool. Whenever you
-               propose a concrete code change, include a GitHub ```suggestion``` code
-               block inside that comment so it can be applied with one click. After
-               posting inline comments, submit an overall verdict via Bash:
-               `gh pr review --request-changes` or `--comment`, plus a concise summary
-               (`--approve` is available but may be rejected for automated tokens on
-               this repo -- don't rely on it working).
+            3. For review/feedback with specific line-level findings, post ONE clean
+               formal review instead of several separate ones:
+               a. Get the PR's head commit SHA:
+                  `gh pr view ${{ steps.pr.outputs.number }} --json headRefOid -q .headRefOid`
+               b. Write a JSON file shaped like this (one entry per finding; include a
+                  GitHub ```suggestion``` code block inside a comment's body whenever
+                  you're proposing a concrete edit, so it can be applied with one click):
+                  {
+                    "commit_id": "<head sha>",
+                    "body": "<overall summary of your findings>",
+                    "event": "COMMENT",
+                    "comments": [
+                      {"path": "<file>", "line": <line>, "body": "<finding>"}
+                    ]
+                  }
+                  Use `"event": "REQUEST_CHANGES"` instead of `"COMMENT"` if something
+                  found should block merge. Never use `"APPROVE"` -- it may be rejected
+                  for automated tokens on this repo, don't rely on it working. An empty
+                  `comments` array is fine for a verdict with no specific line to anchor.
+               c. Submit it in one call:
+                  `gh api repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/reviews --method POST --input <file>`
+               d. If that call fails for any reason, fall back to
+                  `gh pr review --comment` or `--request-changes` with your findings
+                  written out in the body instead -- a working verdict without inline
+                  anchors beats no response at all.
             4. For questions or feedback with no specific line to anchor to, post via
                `gh pr comment ${{ steps.pr.outputs.number }} --body "..."`.
             5. For implementation requests: edit files locally with your file tools,
@@ -206,10 +236,16 @@ jobs:
           # gh pr diff / gh pr view / gh pr comment are lifted directly from Anthropic's
           # own examples/pr-review-comprehensive.yml -- the read/comment channels this
           # prompt relies on since agent mode does no automatic context-gathering or
-          # comment posting. Read/Glob/Grep are included explicitly since agent mode
-          # may not carry tag mode's baseline tool defaults.
+          # comment posting. `Bash(gh api:*)` (broad trailing wildcard, matching this
+          # file's established convention -- see the note on exact-string rules below)
+          # is what the single-review-call step above needs; scoped tighter patterns
+          # like "gh api repos/*/pulls/*/reviews*" risk NOT matching if the permission
+          # matcher doesn't support mid-string globs, which silently denies the call
+          # with no human to fall back on in CI. `gh pr review` stays granted as the
+          # prompt's own explicit fallback. Read/Glob/Grep are included explicitly since
+          # agent mode may not carry tag mode's baseline tool defaults.
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment" "Bash(gh pr review:*)" "Bash(gh pr diff:*)" "Bash(gh pr view:*)" "Bash(gh pr comment:*)" "Bash(git add:*)" "Bash(git commit:*)" "Bash(git rm:*)" "Bash(git push:*)" "Read" "Glob" "Grep" ${{ inputs.build-tools }}
+            --allowedTools "Bash(gh api:*)" "Bash(gh pr review:*)" "Bash(gh pr diff:*)" "Bash(gh pr view:*)" "Bash(gh pr comment:*)" "Bash(git add:*)" "Bash(git commit:*)" "Bash(git rm:*)" "Bash(git push:*)" "Read" "Glob" "Grep" ${{ inputs.build-tools }}
 
       # Issue-only mention: unchanged tag mode, exactly as before this fix -- issues
       # have no "cannot review a PR" problem to escape, so no reason to touch this path.
