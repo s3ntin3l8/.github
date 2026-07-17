@@ -282,16 +282,41 @@ jobs:
                       {"path": "<file>", "line": <line>, "body": "<finding, specific and under ~280 chars>"}
                     ]
                   }
-                  Use `"event": "REQUEST_CHANGES"` instead of `"COMMENT"` if something
-                  found should block merge. Never use `"APPROVE"` -- it may be rejected
-                  for automated tokens on this repo, don't rely on it working. An empty
-                  `comments` array is fine for a verdict with no specific line to anchor.
+                  Event type is derived from the body you just wrote, not a separate
+                  judgment call: `"event": "REQUEST_CHANGES"` iff your `### Critical`
+                  section has at least one real bullet (not "- None"); `"event":
+                  "COMMENT"` otherwise (Warnings/Suggestions-only, or a pure question).
+                  Never use `"APPROVE"` -- it may be rejected for automated tokens on
+                  this repo, don't rely on it working. Keep the event type and the
+                  Critical section in sync -- don't submit `REQUEST_CHANGES` with an
+                  empty Critical section, or `COMMENT` with a populated one.
+                  MANDATORY, not optional: every Critical or Warning finding that names a
+                  specific file and line MUST be an entry in the `comments` array, not
+                  prose inside `body` citing "file.ts:42" -- `body` is for the verdict
+                  summary and anything that genuinely doesn't anchor to one line (a
+                  cross-cutting concern, a missing test file, an architectural note).
+                  This was previously left to your judgment and on at least one large
+                  multi-file PR you defaulted to citing every finding as prose in `body`
+                  and posted an empty `comments` array -- worse for the author, since
+                  prose citations don't show up on the diff view or support one-click
+                  ```suggestion``` blocks. Before submitting, check your own draft
+                  against EVERY Critical/Warning bullet, not just whether `comments` is
+                  empty overall -- a partially-fixed draft (say, two findings correctly
+                  anchored but a third still only cited as prose) is the same bug
+                  recurring in a smaller way. For each Critical/Warning bullet that names
+                  a file:line, confirm there's a matching entry in `comments`; if not,
+                  move it there before calling the API, don't submit as-is. An empty
+                  `comments` array is only correct when there truly is no line-level
+                  finding at all (e.g. a pure question, or all feedback is architectural).
                c. Submit it in one call:
                   `gh api repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/reviews --method POST --input <file>`
                d. If that call fails for any reason, fall back to
                   `gh pr review --comment` or `--request-changes` with your findings
                   written out in the body instead -- a working verdict without inline
-                  anchors beats no response at all.
+                  anchors beats no response at all. Pick between them with the same rule
+                  as above: `--request-changes` iff you have a real Critical finding,
+                  `--comment` otherwise -- this fallback must not become a second place
+                  where that choice drifts back to unaided judgment.
             4. For questions or feedback with no specific line to anchor to, post via
                `gh pr comment ${{ steps.pr.outputs.number }} --body "..."`.
             5. For implementation requests: edit files locally with your file tools,
