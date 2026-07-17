@@ -295,6 +295,23 @@ jobs:
             ${{ inputs.prompt-path }}
             ${{ inputs.issue-prompt-path }}
 
+      # Fail fast if the Hermes API server itself is unreachable, BEFORE attempting the
+      # relay below. /health requires no auth and responds in milliseconds when the
+      # server process is up — so a failure here means the server is actually down
+      # (wrong port, crashed service, host unreachable), not just a long-running review.
+      # This is what makes the relay step's "000 = normal" assumption below safe: by the
+      # time we reach it, we already know the server was reachable moments earlier.
+      - name: Check Hermes API reachability
+        if: steps.check-mention.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
+        env:
+          API_URL: ${{ inputs.hermes-api-url }}
+        run: |
+          set -euo pipefail
+          if ! curl -fsS -m 5 "$API_URL/health" > /dev/null; then
+            echo "::error::Hermes API unreachable at $API_URL/health — review NOT dispatched. Check the review-bot gateway on hermes-01 (systemctl status hermes-review-bot)."
+            exit 1
+          fi
+
       # Relay the request to the Hermes API server on hermes-01. The agent runs there
       # with full tools/memory/skills, re-mints its own GitHub App token, and posts the
       # review/comment BACK TO GITHUB ITSELF. We only forward: which target, the prompt,
@@ -302,8 +319,18 @@ jobs:
       # its result by posting to GitHub, not by replying to this HTTP call. So this
       # step FIRES-AND-FORGETS: it sends the prompt and exits 0 regardless of how
       # long the agent runs (or whether the connection is later closed by the server).
-      # A 4xx (bad auth/key) is the only real failure we surface; anything else
-      # (timeouts, RemoteDisconnected) is expected for a long async run and is ignored.
+      #
+      # Distinguishing a real failure from a healthy long run: the API holds this
+      # connection open until the agent finishes (minutes), so our local -m 20 cap
+      # trips on EVERY non-trivial review — curl exit 28 (timeout-after-connect) and
+      # HTTP code 000 are the NORMAL, expected outcome here, not an error (confirmed:
+      # both successful and silently-failed runs produced curl exit 28 / HTTP 000 —
+      # the "Check Hermes API reachability" step above is what actually catches a down
+      # server, at connect time, before the long-running POST even starts). What we DO
+      # treat as a real failure from this step: curl exit 6/7 (DNS failure / connection
+      # refused — the server died in the few seconds since the health check above) and
+      # HTTP 401/403 (bad auth/key). Anything else (2xx, other 4xx, exit 28) is
+      # accepted-and-running.
       - name: Run Hermes (remote agent on hermes-01)
         id: run
         if: steps.check-mention.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
@@ -334,21 +361,35 @@ jobs:
 
           # Fire-and-forget: send the prompt, ignore the (async) response body.
           # -m 20s cap: we only need the server to ACCEPT the request, not to finish.
-          # Any 4xx is a real config error -> fail. Connection drops/timeouts on a
-          # long run are normal (server keeps working, posts result to GitHub) -> ignore.
+          # Temporarily disable -e to capture curl's real exit code (not just a
+          # collapsed "000" http_code) without aborting the script on a nonzero exit.
+          set +e
           HTTP_CODE=$(curl -sS -m 20 -o /dev/null -w '%{http_code}' \
             -X POST "$API_URL/v1/chat/completions" \
             -H "Authorization: Bearer $API_KEY" \
             -H "Content-Type: application/json" \
             --data "$(jq -nc --arg model "$API_MODEL" --arg content "$MSG" \
               '{model:$model, messages:[{role:"user",content:$content}], stream:false}')" \
-            2>/dev/null || echo "000")
-          echo "::notice::relayed request to hermes-01 (HTTP $HTTP_CODE); agent runs async and posts results to GitHub itself."
+            2>/dev/null)
+          CURL_EXIT=$?
+          set -e
+          echo "::notice::relayed request to hermes-01 (HTTP $HTTP_CODE, curl exit $CURL_EXIT); agent runs async and posts results to GitHub itself."
           if [[ "$HTTP_CODE" == "401" || "$HTTP_CODE" == "403" ]]; then
             echo "::error::Hermes API rejected the key (HTTP $HTTP_CODE) — check HERMES_API_KEY secret."
             exit 1
           fi
-          # 000 / timeout / 2xx / 4xx-other -> treat as accepted-and-running.
+          # curl exit 6 (DNS failure) / 7 (connection refused): the server was reachable
+          # moments ago (the health check above passed) but died before accepting this
+          # POST — a real failure, not a long-running review. Fail loud rather than
+          # silently leaving the run green with nothing dispatched.
+          if [[ "$CURL_EXIT" == "6" || "$CURL_EXIT" == "7" ]]; then
+            echo "::error::Could not connect to Hermes API for the relay POST (curl exit $CURL_EXIT) — review NOT dispatched."
+            exit 1
+          fi
+          # curl exit 28 (timeout after connect) / HTTP 000 / 2xx / other 4xx -> the
+          # server accepted the request and is running the agent asynchronously. This
+          # is the expected outcome for any non-trivial review (see comment above this
+          # step) -> treat as accepted-and-running.
 
 # NOTE: No "post review" step here — the agent on hermes-01 performs the POST using its
 # own App token, exactly as PR #18's original local design did. This preserves the
