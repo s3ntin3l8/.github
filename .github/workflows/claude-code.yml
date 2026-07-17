@@ -63,6 +63,21 @@ name: Claude Code (reusable)
 # the PR branch, any `git commit`+push would have landed on `main`, not the PR -- a
 # second, latent bug this same fix resolves.
 #
+# WHY THE PROMPT FORBIDS BACKGROUND SUBAGENT DELEGATION AND CLARIFIES REFS ARE ALREADY
+# FETCHED: even with the checkout fix above, a large PR (pocket-portfolio-tracker#568,
+# 34 files) still got ZERO response despite the run completing "success". Confirmed via
+# show_full_output logs: the orchestrator spawned 4 parallel Task-tool subagents to
+# split up the review, each of which repeatedly tried `git fetch origin main` (in every
+# shape: bare, chained, piped) -- rejected every time as "multiple operations... requires
+# approval" since `git fetch` isn't on --allowedTools and there's no human in CI to
+# approve it (the fetch was never even necessary -- origin/main was already resolvable
+# without it). The orchestrator's last message was "Waiting on the four background
+# review agents to finish..." and the run ended right there (stop_reason: "end_turn",
+# num_turns: 10) -- it never reached the `gh api .../reviews` step. Root cause: this is
+# a ONE-SHOT run with no continuation; Task-tool delegation is not safe to leave running
+# "in the background" here, because nothing ever comes back to collect the results once
+# the turn ends. See s3ntin3l8/.github#42 for the full trace.
+#
 # Triggers (define in the CALLING repo's workflow, not here -- this is `workflow_call`,
 # same convention as hermes-review.yml in this repo). Typical caller `on:`:
 #   issue_comment: [created]
@@ -223,16 +238,29 @@ jobs:
             ${{ github.event.comment.body || github.event.review.body }}
             ---
 
+            IMPORTANT -- this is a single, unattended, one-shot run: there is no
+            follow-up turn. Do the entire review yourself, directly, in this same turn.
+            Do NOT delegate to background/parallel subagents (the Task tool) -- if you
+            spawn subagents and then stop to "wait" for them to report back, this run
+            simply ends (nothing comes back to collect their results or post anything),
+            and the review is silently lost. For a large PR, work through the files
+            sequentially yourself instead of parallelizing. Also: `origin/main` and this
+            PR's branch are ALREADY fetched by this workflow's checkout steps before you
+            start -- do not run `git fetch`, it is not on your allowed tools and will be
+            rejected with no human present to approve it (wasting turns retrying it is
+            the single biggest cause of reviews never getting posted on large PRs).
+
             Steps:
-            1. Your local checkout is already on this PR's actual branch. Get an
-               overview with `git diff origin/main...HEAD --stat`, then look at
-               specific files one at a time with `git diff origin/main...HEAD -- <file>`
-               or the Read tool on the file itself -- much easier to work with than one
-               giant diff dump. Run `gh pr view ${{ steps.pr.outputs.number }}` for the
-               PR description. Read CLAUDE.md and other relevant files for repo
-               conventions. (`gh pr diff ${{ steps.pr.outputs.number }}` is available
-               too if you want the whole diff at once, but prefer the per-file approach
-               above for anything beyond a tiny PR.)
+            1. Your local checkout is already on this PR's actual branch (see above --
+               no fetch needed). Get an overview with `git diff origin/main...HEAD
+               --stat`, then look at specific files one at a time with `git diff
+               origin/main...HEAD -- <file>` or the Read tool on the file itself --
+               much easier to work with than one giant diff dump. Run `gh pr view ${{
+               steps.pr.outputs.number }}` for the PR description. Read CLAUDE.md and
+               other relevant files for repo conventions. (`gh pr diff ${{
+               steps.pr.outputs.number }}` is available too if you want the whole diff
+               at once, but prefer the per-file approach above for anything beyond a
+               tiny PR.)
             2. Classify the request: review/feedback, a question, an implementation
                request, or a mix -- handle accordingly, combining as needed.
             3. For review/feedback with specific line-level findings, post ONE clean
@@ -272,7 +300,9 @@ jobs:
                of what changed with `gh pr comment`.
             6. This is the ONLY way your response reaches the user -- nothing else is
                visible. Never approve/merge/close the PR beyond what's explicitly
-               requested.
+               requested. Never end your turn saying you're waiting on something else
+               (background agents, a later check, etc.) -- there is no later turn; if
+               you stop without having posted, the user gets nothing.
 
           # `Bash(git diff:*)`/`Bash(git log:*)` are what the "Checkout PR branch" step
           # above enables -- small, per-file local diffs instead of one giant remote
