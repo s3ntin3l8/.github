@@ -221,6 +221,18 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           show_full_output: true
 
+          # Installs the generic, repo-agnostic review methodology (verification
+          # discipline, PR-description hygiene, restraint, inline-anchoring + the
+          # mechanical verdict rule from #38/#44 above) once here instead of
+          # copy-pasting it into every repo's own prompt or CLAUDE.md -- same
+          # "centralize so it can't drift" rationale as this whole reusable workflow.
+          # Deliberately carries no repo-specific domain knowledge; pairs with each
+          # repo's own `.claude/skills/` companion skill for that repo's invariants
+          # (e.g. pocket-portfolio-tracker's `pocket-review-invariants`). See
+          # s3ntin3l8/ai-agent-skills.
+          plugin_marketplaces: https://github.com/s3ntin3l8/ai-agent-skills.git
+          plugins: autonomous-pr-review@ai-agent-skills
+
           additional_permissions: |
             actions: read
 
@@ -262,7 +274,12 @@ jobs:
                at once, but prefer the per-file approach above for anything beyond a
                tiny PR.)
             2. Classify the request: review/feedback, a question, an implementation
-               request, or a mix -- handle accordingly, combining as needed.
+               request, or a mix -- handle accordingly, combining as needed. If it's
+               review/feedback, consult the installed `autonomous-pr-review` skill (and
+               this repo's own companion skill under `.claude/skills/`, if one exists)
+               before writing findings, not after -- that's where the actual review
+               methodology and this repo's domain invariants live; this prompt only
+               covers how to post the result.
             3. For review/feedback with specific line-level findings, post ONE clean
                formal review instead of several separate ones:
                a. Get the PR's head commit SHA:
