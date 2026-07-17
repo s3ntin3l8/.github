@@ -284,8 +284,22 @@ jobs:
                   }
                   Use `"event": "REQUEST_CHANGES"` instead of `"COMMENT"` if something
                   found should block merge. Never use `"APPROVE"` -- it may be rejected
-                  for automated tokens on this repo, don't rely on it working. An empty
-                  `comments` array is fine for a verdict with no specific line to anchor.
+                  for automated tokens on this repo, don't rely on it working.
+                  MANDATORY, not optional: every Critical or Warning finding that names a
+                  specific file and line MUST be an entry in the `comments` array, not
+                  prose inside `body` citing "file.ts:42" -- `body` is for the verdict
+                  summary and anything that genuinely doesn't anchor to one line (a
+                  cross-cutting concern, a missing test file, an architectural note).
+                  This was previously left to your judgment and on at least one large
+                  multi-file PR you defaulted to citing every finding as prose in `body`
+                  and posted an empty `comments` array -- worse for the author, since
+                  prose citations don't show up on the diff view or support one-click
+                  ```suggestion``` blocks. Before submitting, check your own draft: if
+                  `comments` is empty but `body` contains a Critical or Warning bullet
+                  with a file:line reference, that's the bug above recurring -- move it
+                  into `comments` before calling the API, don't submit as-is. An empty
+                  `comments` array is only correct when there truly is no line-level
+                  finding at all (e.g. a pure question, or all feedback is architectural).
                c. Submit it in one call:
                   `gh api repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/reviews --method POST --input <file>`
                d. If that call fails for any reason, fall back to
