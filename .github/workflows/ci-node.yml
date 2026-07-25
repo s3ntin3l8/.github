@@ -201,6 +201,25 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.x'
+      # `pip install detect-secrets==1.5.0` below was previously uncached,
+      # measured at ~20+ seconds per run in a real caller — on top of being a
+      # single pinned version with no requirements file to key `setup-python`'s
+      # own `cache: 'pip'` off of (unlike ci-python.yml's per-project deps).
+      # Deliberately NOT keyed like "Cache Turbo" above (per-commit SHA +
+      # restore-keys fallback): that pattern exists because Turbo cache
+      # validity depends on the exact source tree at that commit, whereas
+      # pip's own cache directory is already content-addressed internally by
+      # package/wheel hash — a stable, version-agnostic key is strictly
+      # better here (no restore-keys needed since this key never changes, and
+      # a future bump of the pinned detect-secrets version doesn't require
+      # touching this key at all; pip simply adds the new version's wheels
+      # to the same warmed cache on next miss).
+      - name: Cache pip (detect-secrets)
+        if: ${{ hashFiles('.secrets.baseline') != '' }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-detect-secrets-${{ runner.os }}
       - name: Detect secrets
         if: ${{ hashFiles('.secrets.baseline') != '' }}
         continue-on-error: ${{ !inputs.strict-checks }}
