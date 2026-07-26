@@ -1,17 +1,34 @@
-## Description
-<!-- Provide a brief summary of the changes and the motivation behind them. -->
+## Summary
 
-## Type of Change
-- [ ] Bug fix (non-breaking change which fixes an issue)
-- [ ] New feature (non-breaking change which adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
-- [ ] Documentation update
-- [ ] Chore / Refactor
+<!-- Describe what changed, why, and any context or subproblems. -->
 
-## Checklist
-- [ ] My code follows the style guidelines of this project
-- [ ] I have performed a self-review of my own code
-- [ ] I have commented my code, particularly in hard-to-understand areas
-- [ ] I have added tests that prove my fix is effective or that my feature works
-- [ ] New and existing unit tests pass locally with my changes
-- [ ] I have updated the documentation accordingly
+### Changes made:
+
+<!-- Numbered list of changes per file/component. E.g.,
+1. **src/services/pty-manager.ts**: Added state persistence.
+-->
+
+### Key design decisions:
+
+<!-- Rationale for non-obvious choices, e.g. filesystem over DB, synchronous vs async, etc. -->
+
+## Test plan / Verification
+
+- [ ] `make lint`
+- [ ] `make typecheck`
+- [ ] `make test`
+- [ ] `make format-check` (repo-wide — also covers `frontend/`)
+- [ ] Frontend changes: `cd frontend && npm run lint && npm run typecheck`, exercised manually in the browser
+- [ ] Schema changes (`src/db/schema.ts`): ran `npm run db:generate` and committed the migration
+
+<!-- Note on schema changes: if yes, make sure migration was generated and committed. -->
+
+Closes #<!-- Issue Number -->
+
+<!--
+PR title must use a Conventional Commits prefix (feat:, fix:, chore:, docs:, ...).
+This repo squash-merges PRs and Release Please parses the PR title, not the
+individual commits — an unprefixed title silently drops from the changelog.
+
+See CONTRIBUTING.md for the full pre-PR checklist and setup steps.
+-->
