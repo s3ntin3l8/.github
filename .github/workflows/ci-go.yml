@@ -18,6 +18,11 @@ on:
         required: false
         type: string
         default: '0'
+      govulncheck-ignore:
+        description: "Comma-separated govulncheck finding IDs (e.g. 'GO-2026-5932') to suppress. Only the listed IDs are ignored -- any other finding still fails the job. Leave empty (default) to fail on any finding, matching prior behavior. Use only for findings that are individually reviewed and have no available fix; re-check periodically and drop the ID once a real fix exists."
+        required: false
+        type: string
+        default: ''
     secrets:
       CODECOV_TOKEN:
         required: false
@@ -106,6 +111,42 @@ jobs:
       - name: Vulnerability scan with govulncheck
         # govulncheck is shipped as a module in the Go toolchain family, so we
         # install it on the fly rather than committing a pre-installed runner.
+        # JSON output is used instead of relying on govulncheck's own exit
+        # code -- that code is always 0 in `-format json` mode, by design, so
+        # the pass/fail decision (and the govulncheck-ignore allowlist) is
+        # applied here against the parsed findings instead.
+        shell: bash
+        env:
+          GOVULNCHECK_IGNORE: ${{ inputs.govulncheck-ignore }}
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          "$(go env GOPATH)/bin/govulncheck" ./...
+          "$(go env GOPATH)/bin/govulncheck" -format json ./... > govulncheck.json
+
+          mapfile -t ignore < <(tr ',' '\n' <<<"$GOVULNCHECK_IGNORE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' || true)
+          mapfile -t found < <(jq -r 'select(.finding != null) | .finding.osv' govulncheck.json | sort -u)
+
+          reported=()
+          ignored=()
+          for id in "${found[@]}"; do
+            skip=""
+            for ig in "${ignore[@]}"; do
+              if [ "$id" = "$ig" ]; then
+                skip="1"
+                break
+              fi
+            done
+            if [ -n "$skip" ]; then
+              ignored+=("$id")
+            else
+              reported+=("$id")
+            fi
+          done
+
+          if [ "${#ignored[@]}" -gt 0 ]; then
+            echo "::warning::govulncheck-ignore suppressed: ${ignored[*]}"
+          fi
+          if [ "${#reported[@]}" -gt 0 ]; then
+            echo "::error::govulncheck found unignored vulnerabilities: ${reported[*]}"
+            exit 1
+          fi
+          echo "govulncheck: clean"
