@@ -45,7 +45,7 @@ Runs `lint` / `typecheck` (opt-in) / `test` npm scripts when present (the defaul
 gofmt, `go vet`, `go build`, tests via `gotestsum` (race + coverage + JUnit), Codecov coverage **and** Test Analytics upload, `govulncheck`.
 - **Caller permissions:** none beyond the default `contents: read`.
 - **Secrets:** `CODECOV_TOKEN` (optional) — pass via `secrets: inherit`.
-- **Inputs:** `go-version` (default empty — override the version, e.g. `'1.23'`), `go-version-file` (default `go.mod` — derives the version when `go-version` is empty), `coverage-fail-under` (default `0` = disabled).
+- **Inputs:** `go-version` (default empty — override the version, e.g. `'1.23'`), `go-version-file` (default `go.mod` — derives the version when `go-version` is empty), `coverage-fail-under` (default `0` = disabled), `govulncheck-ignore` (default empty — comma-separated finding IDs, e.g. `'GO-2026-5932'`, to suppress; use only for individually reviewed findings with no available fix, and drop the ID once one exists).
 - **Pre-build hook:** if a `.github/ci-prebuild.sh` exists in the repo, it runs before build (e.g. to stub `//go:embed` assets). Keep that logic in the script — there is no command-string input.
 - **Expects:** a `go.mod` at the repo root (or override `go-version-file`).
 
