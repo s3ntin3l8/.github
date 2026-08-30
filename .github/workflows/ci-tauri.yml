@@ -1,0 +1,278 @@
+name: Tauri CI
+
+# Modeled on ci-go.yml's conventions (single required lint-and-test job,
+# default: on every input, opt-in coverage-threshold pattern) adapted for a
+# Rust+Tauri project with an npm-built frontend. Unlike ci-go.yml, Tauri
+# cannot cross-compile a GUI app from one host -- WebView2 (Windows), WKWebView
+# (macOS), and webkit2gtk (Linux) are genuinely different per platform -- so
+# this workflow adds a second, non-required build matrix job that ci-go.yml
+# has no equivalent of.
+on:
+  workflow_call:
+    inputs:
+      rust-version:
+        description: "Override the Rust toolchain version (e.g. '1.80'). Empty (the default) uses the latest stable toolchain."
+        required: false
+        type: string
+        default: ''
+      working-directory:
+        description: "Directory containing Cargo.toml (relative to the repo root)."
+        required: false
+        type: string
+        default: 'src-tauri'
+      frontend-build:
+        description: >-
+          Whether to npm-build a frontend before compiling Rust. Tauri's
+          tauri::generate_context!() macro reads the frontendDist directory
+          at COMPILE time (embedding its contents into the binary), so both
+          `cargo build` and `cargo test` fail outright if that directory
+          doesn't exist yet -- this is a correctness requirement for any
+          real Tauri project, not an optional optimization. Default true;
+          set false only for a Rust workspace with no Tauri frontend at all.
+        required: false
+        type: boolean
+        default: true
+      node-version:
+        required: false
+        type: string
+        default: '22'
+      build-script:
+        description: "npm script that produces the frontendDist directory."
+        required: false
+        type: string
+        default: 'build'
+      clippy-args:
+        description: "Extra arguments appended to `cargo clippy --all-targets --all-features`."
+        required: false
+        type: string
+        default: '-- -D warnings'
+      coverage:
+        description: >-
+          Generate coverage via cargo-llvm-cov and upload it to Codecov.
+          Separate from coverage-fail-under (below) on purpose: unlike Go's
+          `-coverprofile`, cargo-llvm-cov re-runs the whole test suite under
+          instrumentation, a real extra cost -- so reporting is opt-in, and
+          a caller can enable reporting without also opting into a hard
+          gate (coverage-fail-under: '0' still uploads to Codecov here).
+        required: false
+        type: boolean
+        default: false
+      coverage-fail-under:
+        description: "Minimum coverage percent required. Only enforced when `coverage: true`; 0 (the default) means report-only, no gate."
+        required: false
+        type: string
+        default: '0'
+      matrix-os:
+        description: >-
+          JSON array of runner labels for the build-verification matrix. Narrow
+          this if a caller only targets a subset of platforms.
+        required: false
+        type: string
+        default: '["ubuntu-latest","windows-latest","macos-latest"]'
+    secrets:
+      CODECOV_TOKEN:
+        required: false
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        if: ${{ inputs.frontend-build }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+
+      - name: Install frontend dependencies
+        if: ${{ inputs.frontend-build }}
+        run: npm ci
+
+      - name: Build frontend
+        if: ${{ inputs.frontend-build }}
+        # Explicit shell: bash -- GitHub Actions defaults windows-latest's
+        # `run:` steps to pwsh, where `$BUILD_SCRIPT` doesn't expand the way
+        # it does on bash (ubuntu/macOS default shell). Confirmed by a real
+        # failure on this exact step during this workflow's own validation
+        # ("the variable '$BUILD_SCRIPT' cannot be retrieved because it has
+        # not been set") -- windows-latest does ship Git Bash, so this is a
+        # one-line fix, not a platform limitation.
+        shell: bash
+        env:
+          BUILD_SCRIPT: ${{ inputs.build-script }}
+        run: npm run "$BUILD_SCRIPT"
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-version != '' && inputs.rust-version || 'stable' }}
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory }}
+
+      # Tauri's own documented Ubuntu prerequisites (v2):
+      # https://v2.tauri.app/start/prerequisites/
+      # `if: runner.os == 'Linux'` is redundant today (this job is pinned to
+      # ubuntu-latest) but documents intent explicitly, matching the build
+      # job's own equivalent guard below.
+      - name: Install Tauri system dependencies (Linux)
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf build-essential
+
+      - name: Format check with rustfmt
+        working-directory: ${{ inputs.working-directory }}
+        run: cargo fmt --check
+
+      - name: Lint with clippy
+        working-directory: ${{ inputs.working-directory }}
+        shell: bash
+        env:
+          CLIPPY_ARGS: ${{ inputs.clippy-args }}
+        run: cargo clippy --all-targets --all-features $CLIPPY_ARGS
+
+      - name: Test
+        working-directory: ${{ inputs.working-directory }}
+        run: cargo test --all-features
+
+      - name: Install cargo-llvm-cov
+        if: ${{ inputs.coverage }}
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Coverage with cargo-llvm-cov
+        if: ${{ inputs.coverage }}
+        working-directory: ${{ inputs.working-directory }}
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+
+      # Self-review caught a real bug in an earlier version of this step:
+      # re-invoking `cargo llvm-cov --summary-only` here (a SEPARATE run from
+      # the one above, re-instrumenting and re-running the whole suite a
+      # second time) and extracting a percentage via `awk '/^TOTAL/
+      # {print $(NF-1)}'` -- that field is the Missed-Branches count (always
+      # 0, branch coverage was never collected), not a percentage, so the
+      # gate silently computed 0% and failed every caller who set a nonzero
+      # threshold, unconditionally. Fixed by parsing the SAME lcov.info the
+      # step above already wrote (summing LF/LH records -- lcov's own
+      # documented format: LF = lines found, LH = lines hit) instead of a
+      # second tool invocation with fragile positional field indexing.
+      - name: Enforce coverage threshold
+        if: ${{ inputs.coverage && inputs.coverage-fail-under != '0' }}
+        working-directory: ${{ inputs.working-directory }}
+        shell: bash
+        env:
+          COVERAGE_FAIL_UNDER: ${{ inputs.coverage-fail-under }}
+        run: |
+          pct="$(awk -F: '/^LF:/ {lf+=$2} /^LH:/ {lh+=$2} END {if (lf>0) printf "%.2f", (lh/lf)*100; else print "0"}' lcov.info)"
+          echo "Total line coverage: ${pct}%"
+          awk -v got="$pct" -v need="$COVERAGE_FAIL_UNDER" \
+            'BEGIN { if (got+0 < need+0) { printf "::error::coverage %.2f%% below threshold %.2f%%\n", got, need; exit 1 } }'
+
+      - name: Upload coverage to Codecov
+        if: ${{ inputs.coverage }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ inputs.working-directory }}/lcov.info
+          flags: rust
+          fail_ci_if_error: false
+
+      # Disclosed gap (see this workflow's own README section): CodeQL has no
+      # Rust support at all. cargo-audit (RustSec advisory database) is the
+      # closest available substitute for dependency-vulnerability scanning --
+      # it is not the same kind of coverage as CodeQL's semantic analysis.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      # Deliberately using cargo-audit's own default severity policy, not
+      # `--deny warnings`: confirmed via a real Tauri v2 Linux run that its
+      # default only hard-fails on RustSec advisories classified as
+      # "Vulnerability" -- entries classified "Warning" (unmaintained,
+      # unsound) are printed but don't fail the job. A real Tauri v2 project
+      # on Linux prints several such Warnings out of the box (atk/gdk/gtk-rs
+      # bindings, deep inside Tauri's own webkit2gtk integration, not
+      # something a caller's Cargo.toml choices can fix) -- `--deny warnings`
+      # would make every Linux build red from day one over issues entirely
+      # outside the caller's control, the same "advisory-only until a repo
+      # can actually act on it" reasoning ci-node.yml's own detect-secrets
+      # step documents for its `strict-checks` default. GitHub's own
+      # Dependabot alerts still surface these Warnings separately (it doesn't
+      # draw the same distinction) -- a green `cargo audit` here does not
+      # mean "zero known advisories," only "zero hard Vulnerabilities."
+      - name: Vulnerability scan with cargo-audit
+        working-directory: ${{ inputs.working-directory }}
+        run: cargo audit
+
+  # Compile-verification matrix, NOT a release-artifact build -- no
+  # tauri-action bundling, no installers. That work belongs in each caller's
+  # own hand-rolled release-please.yml job (see mullion-session-manager's
+  # build-helper-exe/build-helper-pkg for the established precedent), same
+  # split ci-node.yml/ci-go.yml already draw between a PR-gate CI workflow
+  # and release-time artifact building. Runs in parallel with lint-and-test
+  # (no `needs:`) -- same reasoning ci-node.yml's test-shard uses for not
+  # blocking on lint.
+  build:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.matrix-os) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        if: ${{ inputs.frontend-build }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+
+      - name: Install frontend dependencies
+        if: ${{ inputs.frontend-build }}
+        run: npm ci
+
+      - name: Build frontend
+        if: ${{ inputs.frontend-build }}
+        # Explicit shell: bash -- GitHub Actions defaults windows-latest's
+        # `run:` steps to pwsh, where `$BUILD_SCRIPT` doesn't expand the way
+        # it does on bash (ubuntu/macOS default shell). Confirmed by a real
+        # failure on this exact step during this workflow's own validation
+        # ("the variable '$BUILD_SCRIPT' cannot be retrieved because it has
+        # not been set") -- windows-latest does ship Git Bash, so this is a
+        # one-line fix, not a platform limitation.
+        shell: bash
+        env:
+          BUILD_SCRIPT: ${{ inputs.build-script }}
+        run: npm run "$BUILD_SCRIPT"
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-version != '' && inputs.rust-version || 'stable' }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory }}
+          key: ${{ matrix.os }}
+
+      - name: Install Tauri system dependencies (Linux)
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf build-essential
+
+      - name: Build
+        working-directory: ${{ inputs.working-directory }}
+        run: cargo build --release

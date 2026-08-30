@@ -33,7 +33,7 @@ When you change what permissions a workflow needs, update the per-workflow
 
 | Workflow | Required caller `permissions:` |
 |----------|-------------------------------|
-| `ci-python` / `ci-node` / `ci-go` | none beyond default `contents: read` |
+| `ci-python` / `ci-node` / `ci-go` / `ci-tauri` | none beyond default `contents: read` |
 | `docker-publish` | `contents: read`, `packages: write`, `id-token: write` |
 | `codeql` | `actions: read`, `contents: read`, `security-events: write` |
 | `release-please` | `contents: write`, `pull-requests: write` |
@@ -43,8 +43,8 @@ When you change what permissions a workflow needs, update the per-workflow
 ## Layout
 
 - `.github/workflows/*.yml` — reusable workflows (`workflow_call`): `ci-python`,
-  `ci-node`, `ci-go`, `docker-publish`, `codeql`, `release-please`, `ghcr-cleanup`,
-  `dependency-review`.
+  `ci-node`, `ci-go`, `ci-tauri`, `docker-publish`, `codeql`, `release-please`,
+  `ghcr-cleanup`, `dependency-review`.
 - `blueprints/python/` — files to **copy into** a new project (Makefile,
   `pre-commit.yaml`, `pyproject.toml`, README template). These are parallel copies of
   what the **[`python-backend-template`](https://github.com/s3ntin3l8/python-backend-template)**
@@ -53,6 +53,11 @@ When you change what permissions a workflow needs, update the per-workflow
   (Makefile, `pre-commit.yaml`).
 - `blueprints/go/` — files to **copy into** a new Go project (Makefile,
   `pre-commit.yaml`). Keep these in sync with any future Go template repo.
+- `blueprints/tauri/` — files to **copy into** a new Tauri v2 project (Makefile,
+  `pre-commit.yaml`). These are parallel copies of what the
+  **[`tauri-app-template`](https://github.com/s3ntin3l8/tauri-app-template)** repo
+  ships — **keep the two in sync** when you edit either, same convention as the
+  Python blueprint/template pair.
 - `dependabot.yml`, `SECURITY.md`, `.github/PULL_REQUEST_TEMPLATE.md` — org defaults.
 
 ## Conventions
