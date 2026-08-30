@@ -1,0 +1,219 @@
+name: Tauri CI
+
+# Modeled on ci-go.yml's conventions (single required lint-and-test job,
+# default: on every input, opt-in coverage-threshold pattern) adapted for a
+# Rust+Tauri project with an npm-built frontend. Unlike ci-go.yml, Tauri
+# cannot cross-compile a GUI app from one host -- WebView2 (Windows), WKWebView
+# (macOS), and webkit2gtk (Linux) are genuinely different per platform -- so
+# this workflow adds a second, non-required build matrix job that ci-go.yml
+# has no equivalent of.
+on:
+  workflow_call:
+    inputs:
+      rust-version:
+        description: "Override the Rust toolchain version (e.g. '1.80'). Empty (the default) uses the latest stable toolchain."
+        required: false
+        type: string
+        default: ''
+      working-directory:
+        description: "Directory containing Cargo.toml (relative to the repo root)."
+        required: false
+        type: string
+        default: 'src-tauri'
+      frontend-build:
+        description: >-
+          Whether to npm-build a frontend before compiling Rust. Tauri's
+          tauri::generate_context!() macro reads the frontendDist directory
+          at COMPILE time (embedding its contents into the binary), so both
+          `cargo build` and `cargo test` fail outright if that directory
+          doesn't exist yet -- this is a correctness requirement for any
+          real Tauri project, not an optional optimization. Default true;
+          set false only for a Rust workspace with no Tauri frontend at all.
+        required: false
+        type: boolean
+        default: true
+      node-version:
+        required: false
+        type: string
+        default: '22'
+      build-script:
+        description: "npm script that produces the frontendDist directory."
+        required: false
+        type: string
+        default: 'build'
+      clippy-args:
+        description: "Extra arguments appended to `cargo clippy --all-targets --all-features`."
+        required: false
+        type: string
+        default: '-- -D warnings'
+      coverage-fail-under:
+        description: "Minimum coverage percent required (0 disables the check, matching ci-go.yml's behavior). Requires cargo-llvm-cov to produce lcov output."
+        required: false
+        type: string
+        default: '0'
+      matrix-os:
+        description: >-
+          JSON array of runner labels for the build-verification matrix. Narrow
+          this if a caller only targets a subset of platforms.
+        required: false
+        type: string
+        default: '["ubuntu-latest","windows-latest","macos-latest"]'
+    secrets:
+      CODECOV_TOKEN:
+        required: false
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        if: ${{ inputs.frontend-build }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+
+      - name: Install frontend dependencies
+        if: ${{ inputs.frontend-build }}
+        run: npm ci
+
+      - name: Build frontend
+        if: ${{ inputs.frontend-build }}
+        env:
+          BUILD_SCRIPT: ${{ inputs.build-script }}
+        run: npm run "$BUILD_SCRIPT"
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-version != '' && inputs.rust-version || 'stable' }}
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory }}
+
+      # Tauri's own documented Ubuntu prerequisites (v2):
+      # https://v2.tauri.app/start/prerequisites/
+      - name: Install Tauri system dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf build-essential
+
+      - name: Format check with rustfmt
+        working-directory: ${{ inputs.working-directory }}
+        run: cargo fmt --check
+
+      - name: Lint with clippy
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          CLIPPY_ARGS: ${{ inputs.clippy-args }}
+        run: cargo clippy --all-targets --all-features $CLIPPY_ARGS
+
+      - name: Test
+        working-directory: ${{ inputs.working-directory }}
+        run: cargo test --all-features
+
+      - name: Install cargo-llvm-cov
+        if: ${{ inputs.coverage-fail-under != '0' }}
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Coverage with cargo-llvm-cov
+        if: ${{ inputs.coverage-fail-under != '0' }}
+        working-directory: ${{ inputs.working-directory }}
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+
+      - name: Enforce coverage threshold
+        if: ${{ inputs.coverage-fail-under != '0' }}
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          COVERAGE_FAIL_UNDER: ${{ inputs.coverage-fail-under }}
+        run: |
+          pct="$(cargo llvm-cov --all-features --summary-only 2>/dev/null | awk '/^TOTAL/ {print $(NF-1)}' | tr -d '%')"
+          echo "Total line coverage: ${pct}%"
+          awk -v got="$pct" -v need="$COVERAGE_FAIL_UNDER" \
+            'BEGIN { if (got+0 < need+0) { printf "::error::coverage %.2f%% below threshold %.2f%%\n", got, need; exit 1 } }'
+
+      - name: Upload coverage to Codecov
+        if: ${{ inputs.coverage-fail-under != '0' }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ inputs.working-directory }}/lcov.info
+          flags: rust
+          fail_ci_if_error: false
+
+      # Disclosed gap (see this workflow's own README section): CodeQL has no
+      # Rust support at all. cargo-audit (RustSec advisory database) is the
+      # closest available substitute for dependency-vulnerability scanning --
+      # it is not the same kind of coverage as CodeQL's semantic analysis.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Vulnerability scan with cargo-audit
+        working-directory: ${{ inputs.working-directory }}
+        run: cargo audit
+
+  # Compile-verification matrix, NOT a release-artifact build -- no
+  # tauri-action bundling, no installers. That work belongs in each caller's
+  # own hand-rolled release-please.yml job (see mullion-session-manager's
+  # build-helper-exe/build-helper-pkg for the established precedent), same
+  # split ci-node.yml/ci-go.yml already draw between a PR-gate CI workflow
+  # and release-time artifact building. Runs in parallel with lint-and-test
+  # (no `needs:`) -- same reasoning ci-node.yml's test-shard uses for not
+  # blocking on lint.
+  build:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.matrix-os) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        if: ${{ inputs.frontend-build }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+
+      - name: Install frontend dependencies
+        if: ${{ inputs.frontend-build }}
+        run: npm ci
+
+      - name: Build frontend
+        if: ${{ inputs.frontend-build }}
+        env:
+          BUILD_SCRIPT: ${{ inputs.build-script }}
+        run: npm run "$BUILD_SCRIPT"
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-version != '' && inputs.rust-version || 'stable' }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory }}
+          key: ${{ matrix.os }}
+
+      - name: Install Tauri system dependencies (Linux)
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf build-essential
+
+      - name: Build
+        working-directory: ${{ inputs.working-directory }}
+        run: cargo build --release

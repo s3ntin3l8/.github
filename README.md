@@ -49,6 +49,15 @@ gofmt, `go vet`, `go build`, tests via `gotestsum` (race + coverage + JUnit), Co
 - **Pre-build hook:** if a `.github/ci-prebuild.sh` exists in the repo, it runs before build (e.g. to stub `//go:embed` assets). Keep that logic in the script — there is no command-string input.
 - **Expects:** a `go.mod` at the repo root (or override `go-version-file`).
 
+### [CI-Tauri](.github/workflows/ci-tauri.yml)
+`cargo fmt --check`, `cargo clippy`, `cargo test`, optional coverage via `cargo-llvm-cov` + Codecov, `cargo audit`, plus a separate 3-OS build-verification matrix (Tauri, unlike Go, cannot cross-compile a GUI app from one host — WebView2/WKWebView/webkit2gtk are genuinely per-platform).
+- **Caller permissions:** none beyond the default `contents: read`.
+- **Secrets:** `CODECOV_TOKEN` (optional) — pass via `secrets: inherit`.
+- **No CodeQL coverage available.** CodeQL has no Rust language support at all (Go, Python, JS/TS, C/C++, C#, Java/Kotlin, Swift — not Rust). `cargo audit` (RustSec advisory scanning, built into `lint-and-test`) is the closest available substitute — it is not the same kind of coverage as CodeQL's semantic analysis, and a caller should not expect one.
+- **Inputs:** `rust-version` (default `''` = latest stable), `working-directory` (default `src-tauri` — where `Cargo.toml` lives), `frontend-build` (default `true` — npm-builds a frontend before compiling Rust; required whenever `tauri::generate_context!()` embeds a real `frontendDist`, since that macro reads it at compile time), `node-version` (default `22`), `build-script` (default `build`), `clippy-args` (default `-- -D warnings`), `coverage-fail-under` (default `0` = disabled), `matrix-os` (default `'["ubuntu-latest","windows-latest","macos-latest"]'` — narrow this if a caller only targets a subset of platforms).
+- **Expects:** a Tauri v2 project with `Cargo.toml` under `working-directory` and (unless `frontend-build: false`) a `package-lock.json` at the repo root (uses `npm ci`).
+- **The `build` job is a compile-verification matrix, not a release-artifact build** — no bundling, no installers. That belongs in each caller's own hand-rolled release job (see `build-helper-exe`/`build-helper-pkg` in `mullion-session-manager`'s `release-please.yml` for the established shape), same split `ci-node`/`ci-go` already draw between PR-gate CI and release-time artifact building.
+
 ### [Docker-Publish](.github/workflows/docker-publish.yml)
 Multi-arch builds (amd64/arm64), GHCR push, and Cosign signing.
 - **Caller permissions (required):** `contents: read`, `packages: write`, `id-token: write`.
@@ -223,6 +232,10 @@ These are templates you can copy into your local projects to standardize your de
 ### [Go Blueprints](blueprints/go/)
 - [Makefile](blueprints/go/Makefile) - Standard Go dev environment setup (lint, test, build, fmt, vet, tidy, vulncheck, clean).
 - [pre-commit.yaml](blueprints/go/pre-commit.yaml) - Standard Go pre-commit hooks (gofmt, go vet, go mod tidy, go test, govulncheck).
+
+### [Tauri Blueprints](blueprints/tauri/)
+- [Makefile](blueprints/tauri/Makefile) - Standard Tauri v2 dev environment setup (lint, fmt, test, build, dev, vulncheck, clean).
+- [pre-commit.yaml](blueprints/tauri/pre-commit.yaml) - Standard Tauri v2 pre-commit hooks (cargo fmt, cargo clippy, cargo test). See [`tauri-app-template`](https://github.com/s3ntin3l8/tauri-app-template) for a full working example these are extracted from.
 
 ## 🛡️ Templates
 - [dependabot.yml](dependabot.yml) - Recommended configuration for weekly dependency updates.
