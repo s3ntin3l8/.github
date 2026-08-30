@@ -192,6 +192,21 @@ jobs:
       - name: Install cargo-audit
         uses: taiki-e/install-action@cargo-audit
 
+      # Deliberately using cargo-audit's own default severity policy, not
+      # `--deny warnings`: confirmed via a real Tauri v2 Linux run that its
+      # default only hard-fails on RustSec advisories classified as
+      # "Vulnerability" -- entries classified "Warning" (unmaintained,
+      # unsound) are printed but don't fail the job. A real Tauri v2 project
+      # on Linux prints several such Warnings out of the box (atk/gdk/gtk-rs
+      # bindings, deep inside Tauri's own webkit2gtk integration, not
+      # something a caller's Cargo.toml choices can fix) -- `--deny warnings`
+      # would make every Linux build red from day one over issues entirely
+      # outside the caller's control, the same "advisory-only until a repo
+      # can actually act on it" reasoning ci-node.yml's own detect-secrets
+      # step documents for its `strict-checks` default. GitHub's own
+      # Dependabot alerts still surface these Warnings separately (it doesn't
+      # draw the same distinction) -- a green `cargo audit` here does not
+      # mean "zero known advisories," only "zero hard Vulnerabilities."
       - name: Vulnerability scan with cargo-audit
         working-directory: ${{ inputs.working-directory }}
         run: cargo audit
