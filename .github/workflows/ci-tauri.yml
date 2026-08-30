@@ -84,6 +84,14 @@ jobs:
 
       - name: Build frontend
         if: ${{ inputs.frontend-build }}
+        # Explicit shell: bash -- GitHub Actions defaults windows-latest's
+        # `run:` steps to pwsh, where `$BUILD_SCRIPT` doesn't expand the way
+        # it does on bash (ubuntu/macOS default shell). Confirmed by a real
+        # failure on this exact step during this workflow's own validation
+        # ("the variable '$BUILD_SCRIPT' cannot be retrieved because it has
+        # not been set") -- windows-latest does ship Git Bash, so this is a
+        # one-line fix, not a platform limitation.
+        shell: bash
         env:
           BUILD_SCRIPT: ${{ inputs.build-script }}
         run: npm run "$BUILD_SCRIPT"
@@ -101,7 +109,11 @@ jobs:
 
       # Tauri's own documented Ubuntu prerequisites (v2):
       # https://v2.tauri.app/start/prerequisites/
+      # `if: runner.os == 'Linux'` is redundant today (this job is pinned to
+      # ubuntu-latest) but documents intent explicitly, matching the build
+      # job's own equivalent guard below.
       - name: Install Tauri system dependencies (Linux)
+        if: ${{ runner.os == 'Linux' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf build-essential
@@ -112,6 +124,7 @@ jobs:
 
       - name: Lint with clippy
         working-directory: ${{ inputs.working-directory }}
+        shell: bash
         env:
           CLIPPY_ARGS: ${{ inputs.clippy-args }}
         run: cargo clippy --all-targets --all-features $CLIPPY_ARGS
@@ -132,6 +145,7 @@ jobs:
       - name: Enforce coverage threshold
         if: ${{ inputs.coverage-fail-under != '0' }}
         working-directory: ${{ inputs.working-directory }}
+        shell: bash
         env:
           COVERAGE_FAIL_UNDER: ${{ inputs.coverage-fail-under }}
         run: |
@@ -193,6 +207,14 @@ jobs:
 
       - name: Build frontend
         if: ${{ inputs.frontend-build }}
+        # Explicit shell: bash -- GitHub Actions defaults windows-latest's
+        # `run:` steps to pwsh, where `$BUILD_SCRIPT` doesn't expand the way
+        # it does on bash (ubuntu/macOS default shell). Confirmed by a real
+        # failure on this exact step during this workflow's own validation
+        # ("the variable '$BUILD_SCRIPT' cannot be retrieved because it has
+        # not been set") -- windows-latest does ship Git Bash, so this is a
+        # one-line fix, not a platform limitation.
+        shell: bash
         env:
           BUILD_SCRIPT: ${{ inputs.build-script }}
         run: npm run "$BUILD_SCRIPT"
