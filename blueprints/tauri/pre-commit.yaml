@@ -31,9 +31,30 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: cargo-lock-check
+        name: Cargo.lock freshness (check)
+        # --locked asserts Cargo.lock doesn't need to change to resolve
+        # against Cargo.toml -- fails if it's out of sync, same role
+        # blueprints/go/pre-commit.yaml's go-mod-tidy hook plays for go.sum.
+        entry: bash -c 'cd src-tauri && cargo metadata --locked --format-version 1 > /dev/null'
+        language: system
+        types: [rust]
+        pass_filenames: false
+
       - id: cargo-test
         name: cargo test
         entry: bash -c 'cd src-tauri && cargo test --all-features'
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: cargo-audit
+        name: cargo audit
+        # Same local, repo-scoped install pattern blueprints/go/pre-commit.yaml
+        # uses for govulncheck (`cargo install --root DIR PKG` always nests
+        # an extra bin/ under DIR, hence the doubled path below).
+        entry: bash -c 'cargo install --root "$(git rev-parse --show-toplevel)/.bin" cargo-audit --quiet && "$(git rev-parse --show-toplevel)/.bin/bin/cargo-audit" audit --file src-tauri/Cargo.lock'
         language: system
         types: [rust]
         pass_filenames: false

@@ -34,5 +34,7 @@ vulncheck: ## Scan Rust dependencies for known vulnerabilities (requires: cargo 
 	cd src-tauri && cargo audit
 
 clean: ## Remove build artifacts
+	# `dist` matches this blueprint's own Vite-style frontendDist convention --
+	# adjust if your project's frontend build writes elsewhere (build/, .output/, out/, ...).
 	rm -rf dist node_modules
 	cd src-tauri && cargo clean

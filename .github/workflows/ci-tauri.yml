@@ -46,8 +46,19 @@ on:
         required: false
         type: string
         default: '-- -D warnings'
+      coverage:
+        description: >-
+          Generate coverage via cargo-llvm-cov and upload it to Codecov.
+          Separate from coverage-fail-under (below) on purpose: unlike Go's
+          `-coverprofile`, cargo-llvm-cov re-runs the whole test suite under
+          instrumentation, a real extra cost -- so reporting is opt-in, and
+          a caller can enable reporting without also opting into a hard
+          gate (coverage-fail-under: '0' still uploads to Codecov here).
+        required: false
+        type: boolean
+        default: false
       coverage-fail-under:
-        description: "Minimum coverage percent required (0 disables the check, matching ci-go.yml's behavior). Requires cargo-llvm-cov to produce lcov output."
+        description: "Minimum coverage percent required. Only enforced when `coverage: true`; 0 (the default) means report-only, no gate."
         required: false
         type: string
         default: '0'
@@ -134,28 +145,39 @@ jobs:
         run: cargo test --all-features
 
       - name: Install cargo-llvm-cov
-        if: ${{ inputs.coverage-fail-under != '0' }}
+        if: ${{ inputs.coverage }}
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Coverage with cargo-llvm-cov
-        if: ${{ inputs.coverage-fail-under != '0' }}
+        if: ${{ inputs.coverage }}
         working-directory: ${{ inputs.working-directory }}
         run: cargo llvm-cov --all-features --lcov --output-path lcov.info
 
+      # Self-review caught a real bug in an earlier version of this step:
+      # re-invoking `cargo llvm-cov --summary-only` here (a SEPARATE run from
+      # the one above, re-instrumenting and re-running the whole suite a
+      # second time) and extracting a percentage via `awk '/^TOTAL/
+      # {print $(NF-1)}'` -- that field is the Missed-Branches count (always
+      # 0, branch coverage was never collected), not a percentage, so the
+      # gate silently computed 0% and failed every caller who set a nonzero
+      # threshold, unconditionally. Fixed by parsing the SAME lcov.info the
+      # step above already wrote (summing LF/LH records -- lcov's own
+      # documented format: LF = lines found, LH = lines hit) instead of a
+      # second tool invocation with fragile positional field indexing.
       - name: Enforce coverage threshold
-        if: ${{ inputs.coverage-fail-under != '0' }}
+        if: ${{ inputs.coverage && inputs.coverage-fail-under != '0' }}
         working-directory: ${{ inputs.working-directory }}
         shell: bash
         env:
           COVERAGE_FAIL_UNDER: ${{ inputs.coverage-fail-under }}
         run: |
-          pct="$(cargo llvm-cov --all-features --summary-only 2>/dev/null | awk '/^TOTAL/ {print $(NF-1)}' | tr -d '%')"
+          pct="$(awk -F: '/^LF:/ {lf+=$2} /^LH:/ {lh+=$2} END {if (lf>0) printf "%.2f", (lh/lf)*100; else print "0"}' lcov.info)"
           echo "Total line coverage: ${pct}%"
           awk -v got="$pct" -v need="$COVERAGE_FAIL_UNDER" \
             'BEGIN { if (got+0 < need+0) { printf "::error::coverage %.2f%% below threshold %.2f%%\n", got, need; exit 1 } }'
 
       - name: Upload coverage to Codecov
-        if: ${{ inputs.coverage-fail-under != '0' }}
+        if: ${{ inputs.coverage }}
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
