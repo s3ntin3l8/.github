@@ -56,3 +56,44 @@ repos:
         types: [go]
         pass_filenames: false
         stages: [pre-push]
+
+      - id: golangci-lint
+        name: golangci-lint
+        # Do NOT use the bundled `repo: github.com/golangci/golangci-lint`
+        # form here. The version that pre-commit bundles (v2.12.2 at the
+        # time of writing) installs a `+dirty` release-prep binary that
+        # panics inside honnef.co/go-tools@v0.7.0's buildir pass when
+        # running over the full repo -- the panic is triggered by
+        # transitive analysis of the stdlib `net/poll` package, which
+        # only happens on a `--all-files` (or `make lint`) run; single-
+        # file `--files` runs pass. The panic is Go-toolchain-version-
+        # sensitive and reproduces when golangci-lint is built with Go
+        # below the version declared in `go.mod`'s `toolchain` directive.
+        #
+        # Installing via `go install` (same pattern as the `govulncheck`
+        # hook above) sidesteps the panic: the `go install`-built binary
+        # is compiled against the local Go toolchain, which inherits the
+        # `net/poll` AST shape that doesn't trigger the panic.
+        #
+        # `GOTOOLCHAIN=go1.26.5` is a minimum-version floor (bare versions
+        # behave as `<ver>+auto`), not an exact pin: a host with Go 1.27+
+        # builds the binary with 1.27+ and inherits the same stdlib
+        # `net/poll` AST shape that doesn't trigger the panic. Either way,
+        # the binary is built with a Go that's at least the version the
+        # blueprint's host `go.mod` would declare.
+        #
+        # `stages: [pre-push]` mirrors the analogous `govulncheck` hook:
+        # the first cold run downloads the toolchain (on a host with an
+        # older Go) and compiles golangci-lint from source -- minutes on
+        # the first `git commit`, where a bundled binary would be
+        # instant. Deferring to pre-push means devs pay that cost once
+        # before pushing, not on every commit.
+        #
+        # Pin MUST stay in lockstep with any consumer repo's CI
+        # `golangci/golangci-lint-action` `version:` input, so local and
+        # CI track the same upstream golangci-lint release.
+        entry: bash -c 'GOTOOLCHAIN=go1.26.5 GOBIN="$(git rev-parse --show-toplevel)/.bin" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 && "$(git rev-parse --show-toplevel)/.bin/golangci-lint" --timeout 5m run'
+        language: system
+        types: [go]
+        pass_filenames: false
+        stages: [pre-push]

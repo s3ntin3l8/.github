@@ -231,7 +231,7 @@ These are templates you can copy into your local projects to standardize your de
 
 ### [Go Blueprints](blueprints/go/)
 - [Makefile](blueprints/go/Makefile) - Standard Go dev environment setup (lint, test, build, fmt, vet, tidy, vulncheck, clean).
-- [pre-commit.yaml](blueprints/go/pre-commit.yaml) - Standard Go pre-commit hooks (gofmt, go vet, go mod tidy, go test, govulncheck).
+- [pre-commit.yaml](blueprints/go/pre-commit.yaml) - Standard Go pre-commit hooks (gofmt, go vet, go mod tidy, go test, govulncheck, golangci-lint via local `go install`).
 
 ### [Tauri Blueprints](blueprints/tauri/)
 - [Makefile](blueprints/tauri/Makefile) - Standard Tauri v2 dev environment setup (lint, fmt, test, build, dev, vulncheck, clean).
