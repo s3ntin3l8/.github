@@ -11,6 +11,21 @@ on:
         required: false
         type: string
         default: '.release-please-manifest.json'
+      # Pass-through to release-please-action. Default false (normal
+      # behavior). Set true to skip POST /repos/{owner}/{repo}/releases
+      # -- useful when the release commit's diff to the current default
+      # branch tip includes .github/workflows/* changes, in which case
+      # GitHub requires the token to be authorized for workflows and the
+      # default GITHUB_TOKEN explicitly cannot be (see the "Create a
+      # release" REST API docs). With skip-github-release: true the
+      # action still updates the manifest and CHANGELOG PR; the operator
+      # creates the GitHub Release + tag out-of-band (e.g. with an admin
+      # PAT). release_created output remains false in that case, so any
+      # downstream chained job gated on it will skip too.
+      skip-github-release:
+        required: false
+        type: boolean
+        default: false
     outputs:
       release_created:
         description: "Whether a release was created"
@@ -34,3 +49,4 @@ jobs:
         with:
           config-file: ${{ inputs.config-file }}
           manifest-file: ${{ inputs.manifest-file }}
+          skip-github-release: ${{ inputs.skip-github-release }}
