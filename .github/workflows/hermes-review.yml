@@ -35,6 +35,20 @@ name: Hermes PR Review (reusable)
 # cascade. On-demand @mention works through issue_comment alone (PR-conversation
 # comments and issue comments BOTH arrive as issue_comment). See s3ntin3l8/.github#527.
 #
+# SECURITY (fork guard, automatic): for a `pull_request` event, GitHub runs the workflow
+# file from the PR's own head ref — i.e. a fork's copy of this file — on the runner the
+# job-level `if:` lets it reach. The job-level guard below skips the run when the head
+# repo is a fork (full_name != this repo), so a stranger opening a fork PR cannot rewrite
+# the job's `run:` steps to execute attacker code on the self-hosted runner host. Fork
+# PRs get no secrets and a read-only token, but the runner itself (filesystem + LAN
+# access to hermes-01) is the trust boundary, not the token. This guard is automatic in
+# the reusable so callers cannot forget it; callers don't need to add their own copy.
+# Found by s3ntin3l8-hermes[bot]'s review of s3ntin3l8/pocket-portfolio-tracker#720,
+# which introduced an auto-review job that lacked the guard. The on-demand path
+# (`issue_comment`) is unaffected: GitHub always runs the base-branch copy of the
+# workflow for `issue_comment`, and the existing author_association-style gates in the
+# caller are sufficient on their own (a maintainer's @mention on a fork PR still works).
+#
 # Required caller setup (once per calling repo):
 #   1. Register a GitHub App with permissions Contents:Write (open PRs), Pull requests:
 #      Read&write, Checks:Read&write, Issues:Write (triage); subscribe to Issue comment
@@ -59,6 +73,10 @@ name: Hermes PR Review (reusable)
 #   jobs:
 #     hermes:
 #       if: github.actor != 's3ntin3l8-hermes[bot]'
+#       # NOTE: the fork guard is automatic in the reusable — no caller-side
+#       # `head.repo.full_name` check needed for the on-demand path. For an
+#       # auto-review path triggered by `pull_request`, the guard runs inside
+#       # the reusable; callers don't need to duplicate it.
 #       permissions:
 #         contents: write
 #         pull-requests: write
@@ -153,7 +171,13 @@ jobs:
     # The caller gates the cheap event-type + self-trigger checks (see README). The
     # actual "@<mention-trigger>" substring check happens in the "Check mention" step
     # below, using the mention-trigger input, so the slug lives in exactly one place.
-    if: github.actor != 's3ntin3l8-hermes[bot]'
+    # The fork guard below is automatic — callers don't need their own copy: it skips
+    # the run whenever the triggering event is a `pull_request` from a fork (full_name
+    # != this repo), which would otherwise let an attacker rewrite the file before
+    # GitHub executes it on the self-hosted runner. See SECURITY note in the header.
+    if: |
+      github.actor != 's3ntin3l8-hermes[bot]' &&
+      !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: self-hosted
     timeout-minutes: 30
     steps:
