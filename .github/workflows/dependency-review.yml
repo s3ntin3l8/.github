@@ -5,6 +5,12 @@ on:
 
 jobs:
   dependency-review:
+    # Free on public repos; requires GitHub Advanced Security on private ones
+    # (would otherwise fail the job with a 403). Skip silently — matches the
+    # consumer-side guard in `pocket-portfolio-tracker` and any future Pattern
+    # A' wrapper. Bake it into the reusable so every caller is auto-protected
+    # without per-wrapper config.
+    if: ${{ github.event.repository.private == false }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
