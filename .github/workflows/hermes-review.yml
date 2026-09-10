@@ -44,10 +44,18 @@ name: Hermes PR Review (reusable)
 # access to hermes-01) is the trust boundary, not the token. This guard is automatic in
 # the reusable so callers cannot forget it; callers don't need to add their own copy.
 # Found by s3ntin3l8-hermes[bot]'s review of s3ntin3l8/pocket-portfolio-tracker#720,
-# which introduced an auto-review job that lacked the guard. The on-demand path
-# (`issue_comment`) is unaffected: GitHub always runs the base-branch copy of the
-# workflow for `issue_comment`, and the existing author_association-style gates in the
-# caller are sufficient on their own (a maintainer's @mention on a fork PR still works).
+# which introduced an auto-review job that lacked the guard.
+#
+# SECURITY (trusted-commenter gate, automatic): the job-level `if:` below also enforces
+# an author_association allow-list (MEMBER/OWNER/COLLABORATOR) on every on-demand event
+# path, same as the fork guard's reasoning — automatic in the reusable so callers cannot
+# forget it. Before this, the gate only existed where a caller remembered to copy it into
+# its own `if:`, which left s3ntin3l8/mullion-helper and s3ntin3l8/tauri-app-template with
+# NO gate at all: any public commenter on those (public) repos could trigger a run that
+# inherits HERMES_* secrets on the self-hosted, LAN-reachable runner. See
+# s3ntin3l8/mullion-helper#14. A caller MAY still keep its own copy of this check as
+# defense-in-depth (as the fork guard already is in several callers) — it's redundant,
+# not required.
 #
 # Required caller setup (once per calling repo):
 #   1. Register a GitHub App with permissions Contents:Write (open PRs), Pull requests:
@@ -73,12 +81,12 @@ name: Hermes PR Review (reusable)
 #   jobs:
 #     hermes:
 #       if: github.actor != 's3ntin3l8-hermes[bot]'
-#       # NOTE: the fork guard is automatic in the reusable — no caller-side
-#       # `head.repo.full_name` check needed for the on-demand path. For an
-#       # auto-review path triggered by `pull_request`, the guard runs inside
-#       # the reusable; callers don't need to duplicate it.
+#       # NOTE: the fork guard AND the trusted-commenter (author_association) gate
+#       # are both automatic in the reusable — no caller-side copy of either is
+#       # required for this on-demand path or for an auto-review `pull_request` path;
+#       # callers don't need to duplicate them.
 #       permissions:
-#         contents: write
+#         contents: read
 #         pull-requests: write
 #         issues: write
 #         checks: write
@@ -168,16 +176,58 @@ on:
 
 jobs:
   hermes-review:
-    # The caller gates the cheap event-type + self-trigger checks (see README). The
-    # actual "@<mention-trigger>" substring check happens in the "Check mention" step
-    # below, using the mention-trigger input, so the slug lives in exactly one place.
-    # The fork guard below is automatic — callers don't need their own copy: it skips
-    # the run whenever the triggering event is a `pull_request` from a fork (full_name
-    # != this repo), which would otherwise let an attacker rewrite the file before
-    # GitHub executes it on the self-hosted runner. See SECURITY note in the header.
+    # FAIL-CLOSED ALLOW-LIST, mirroring claude-code.yml's shape: one arm per event
+    # type, each carrying its own trust check, ORed together. Any event type nobody
+    # anticipated (e.g. a caller mistakenly subscribing to something new) evaluates
+    # to none-of-the-arms-match -> false -> skipped, instead of running unchecked.
+    # The "@<mention-trigger>" substring itself is still checked separately in the
+    # "Check mention" step below (using the mention-trigger input) — this `if:` only
+    # gates WHO is allowed to trigger a run, not WHAT they said.
+    #
+    # issue_comment / pull_request_review_comment / pull_request_review / issues:
+    # on-demand mode, gated by author_association (MEMBER/OWNER/COLLABORATOR) on
+    # that event's own payload path. Centralized here instead of copy-pasted into
+    # every caller — previously this gate only existed where a caller remembered to
+    # add its own copy, which left mullion-helper and tauri-app-template with NO
+    # gate at all (any public commenter could trigger a secret-inheriting run on a
+    # self-hosted runner). See s3ntin3l8/mullion-helper#14.
+    #
+    # pull_request: auto mode (mode: auto). Composite condition, not
+    # author_association (there's no comment to check authorship of):
+    #   - fork guard (unchanged from before): skips when the head repo isn't this
+    #     repo, so a fork PR can't rewrite this file to run attacker steps on the
+    #     self-hosted runner. Automatic here so callers cannot forget it.
+    #   - PR-author bot exclusion via github.event.pull_request.user.login, NOT
+    #     github.actor: on `ready_for_review`, github.actor is whoever clicked
+    #     "Ready for review" (not necessarily who opened the PR), so an
+    #     actor-based check silently stops excluding bot-authored PRs on that
+    #     trigger. Author-based exclusion holds on both `opened` and
+    #     `ready_for_review`.
+    #   - mullion/task-* branch exclusion: Task Master's own reviewer bot already
+    #     reviews its own task PRs (any Mullion-managed repo, not just
+    #     mullion-session-manager's own codebase — Task Master operates across
+    #     repos), so an auto-review here only races the task's approve/merge.
+    #     Deliberately scoped to this arm only: on-demand (@mention) stays
+    #     ungated, so a human can still explicitly ask for a second opinion on a
+    #     Task Master PR. mullion-session-manager#998; the namespace's stability
+    #     is a documented design invariant (see docs/superpowers/specs/
+    #     2026-09-03-task-master-descriptive-branches-design.md in that repo).
     if: |
       github.actor != 's3ntin3l8-hermes[bot]' &&
-      !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
+      (
+        (github.event_name == 'issue_comment' && contains(fromJSON('["MEMBER", "OWNER", "COLLABORATOR"]'), github.event.comment.author_association)) ||
+        (github.event_name == 'pull_request_review_comment' && contains(fromJSON('["MEMBER", "OWNER", "COLLABORATOR"]'), github.event.comment.author_association)) ||
+        (github.event_name == 'pull_request_review' && contains(fromJSON('["MEMBER", "OWNER", "COLLABORATOR"]'), github.event.review.author_association)) ||
+        (github.event_name == 'issues' && contains(fromJSON('["MEMBER", "OWNER", "COLLABORATOR"]'), github.event.issue.author_association)) ||
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          github.event.pull_request.user.login != 's3ntin3l8-hermes[bot]' &&
+          github.event.pull_request.user.login != 'dependabot[bot]' &&
+          github.event.pull_request.user.login != 'github-actions[bot]' &&
+          !startsWith(github.event.pull_request.head.ref, 'mullion/task-')
+        )
+      )
     runs-on: self-hosted
     timeout-minutes: 30
     steps:
@@ -285,16 +335,24 @@ jobs:
           BOT_LOGIN: ${{ inputs.mention-trigger }}[bot]
         run: |
           set -euo pipefail
+          # NOTE: `gh api --jq` takes exactly one argument (the filter) -- it does not
+          # accept jq's own `--arg name value` flag the way a bare `jq` invocation
+          # would (confirmed: `gh api ... --jq --arg bot "$BOT_LOGIN" '...'` errors
+          # "accepts 1 arg(s), received 4"). That bug shipped silently for a while:
+          # the failure was swallowed by `2>/dev/null || echo 0`, so this guard always
+          # reported "no prior review found" and never actually skipped a re-trigger
+          # (confirmed live on mullion-session-manager#16: a third bot review was
+          # dispatched despite two non-dismissed reviews already posted). Use jq's
+          # built-in `env` object instead -- it reads BOT_LOGIN from this step's own
+          # `env:` block directly, with no `--arg`/quoting/injection concerns.
           if [[ "$KIND" == "pr" ]]; then
             # Already posted a (non-dismissed) review on this PR by THIS bot? -> skip.
             COUNT=$(gh api "repos/$REPO/pulls/$NUMBER/reviews" \
-              --jq --arg bot "$BOT_LOGIN" \
-              '[.[] | select(.user.login == $bot and .state != "DISMISSED")] | length' 2>/dev/null || echo 0)
+              --jq '[.[] | select(.user.login == env.BOT_LOGIN and .state != "DISMISSED")] | length' 2>/dev/null || echo 0)
           else
             # Already commented on this issue by THIS bot? -> skip.
             COUNT=$(gh api "repos/$REPO/issues/$NUMBER/comments" \
-              --jq --arg bot "$BOT_LOGIN" \
-              '[.[] | select(.user.login == $bot)] | length' 2>/dev/null || echo 0)
+              --jq '[.[] | select(.user.login == env.BOT_LOGIN)] | length' 2>/dev/null || echo 0)
           fi
           if [[ "${COUNT:-0}" != "0" ]]; then
             echo "::notice::$BOT_LOGIN already acted on $KIND #$NUMBER ($COUNT prior) — skipping re-trigger."
