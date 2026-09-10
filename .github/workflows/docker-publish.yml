@@ -22,6 +22,10 @@ on:
         required: false
         type: boolean
         default: false
+      push-release:
+        required: false
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       image-name:
