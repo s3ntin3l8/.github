@@ -1,6 +1,27 @@
 name: Docker Publish
 
 on:
+  # Lets this shared workflow be exercised standalone (e.g. against a scratch
+  # image-name) without a downstream caller — the multi-image merge-job plumbing
+  # (per-image digest download/manifest-assembly) has no other way to be smoke-tested
+  # before a caller's first real push.
+  workflow_dispatch:
+    inputs:
+      image-name:
+        required: true
+        type: string
+      dockerfile:
+        required: false
+        type: string
+        default: 'Dockerfile'
+      platforms:
+        required: false
+        type: string
+        default: 'linux/amd64,linux/arm64'
+      push-edge:
+        required: false
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       image-name:
@@ -21,12 +42,12 @@ on:
         required: false
         type: string
         default: 'linux/amd64,linux/arm64'
-      # Path to the Dockerfile, relative to `context` (the repo root). Default is the
-      # repo-root `Dockerfile`. Set this when a repo publishes more than one image from
-      # the same checkout — e.g. `Dockerfile` for the API, `apps/web/Dockerfile` for the
-      # web frontend. Each distinct Dockerfile must be a separate workflow_call invocation;
-      # build/matrix/cache scoping is namespaced per `image-name`, so two parallel
-      # invocations in the same caller run do not collide.
+      # Path to the Dockerfile, relative to the repo root (the build `context` below is
+      # hardcoded to `.`). Default is the repo-root `Dockerfile`. Set this when a repo
+      # publishes more than one image from the same checkout — e.g. `Dockerfile` for the
+      # API, `apps/web/Dockerfile` for the web frontend. Each distinct Dockerfile must be
+      # a separate workflow_call invocation; build/matrix/cache scoping is namespaced per
+      # `image-name`, so two parallel invocations in the same caller run do not collide.
       dockerfile:
         required: false
         type: string
@@ -180,20 +201,29 @@ jobs:
 
       - name: Export digest
         if: ${{ needs.prepare.outputs.push == 'true' }}
+        env:
+          IMAGE_SLUG: ${{ needs.prepare.outputs.image-slug }}
         run: |
           # Per-image subdir so two same-run invocations (one per image) never share a
           # `/tmp/digests` flat namespace — see merge's `docker buildx imagetools create`
           # below, which globs every file in here and assumes they all belong to this
           # invocation's `image-name`.
-          mkdir -p "/tmp/digests/${{ needs.prepare.outputs.image-slug }}"
+          mkdir -p "/tmp/digests/${IMAGE_SLUG}"
           digest='${{ steps.build.outputs.digest }}'
-          touch "/tmp/digests/${{ needs.prepare.outputs.image-slug }}/${digest#sha256:}"
+          touch "/tmp/digests/${IMAGE_SLUG}/${digest#sha256:}"
 
       - name: Upload digest
         if: ${{ needs.prepare.outputs.push == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ needs.prepare.outputs.image-slug }}-${{ steps.arch.outputs.slug }}
+          # Double-dash delimiter, not single: `image-slug` isn't guaranteed
+          # collision-free under a single-dash join. A repo publishing both
+          # `pocket-portfolio-tracker` and `pocket-portfolio-tracker-web` makes the
+          # first slug a strict prefix of the second, so a `digests-<slug>-*` pattern
+          # in the merge job below would match both invocations' artifacts. `--` can't
+          # occur inside a slug (image-name has already had `/` and `:` replaced with
+          # `-`), so it's a safe, unambiguous separator.
+          name: digests-${{ needs.prepare.outputs.image-slug }}--${{ steps.arch.outputs.slug }}
           path: /tmp/digests/${{ needs.prepare.outputs.image-slug }}/*
           if-no-files-found: error
           retention-days: 1
@@ -214,11 +244,18 @@ jobs:
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
-          path: /tmp/digests
-          # image-slug-scoped so this invocation only pulls digests it produced.
-          # `merge-multiple: false` (the default) is intentional — the digests for
-          # this image land under their own subdir, one file per arch, no flattening.
-          pattern: digests-${{ needs.prepare.outputs.image-slug }}-*
+          # `download-artifact@v4` extracts each matched artifact into its own
+          # subdirectory named after the artifact (e.g.
+          # /tmp/digests/digests-<slug>--<arch>/<digest-file>) unless
+          # `merge-multiple: true` is set — it does NOT reproduce the upload side's
+          # `/tmp/digests/<image-slug>/` layout on its own. Pointing `path` at the
+          # per-image dir and flattening with `merge-multiple` is what makes the
+          # `working-directory` below (and its `*` glob) valid.
+          path: /tmp/digests/${{ needs.prepare.outputs.image-slug }}
+          # image-slug-scoped, `--`-delimited so this invocation only pulls the
+          # digests it produced (see the matching comment on `Upload digest`).
+          pattern: digests-${{ needs.prepare.outputs.image-slug }}--*
+          merge-multiple: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
