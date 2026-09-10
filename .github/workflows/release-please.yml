@@ -12,15 +12,22 @@ on:
         type: string
         default: '.release-please-manifest.json'
       # Pass-through to release-please-action. Default false (normal
-      # behavior). Set true to skip POST /repos/{owner}/{repo}/releases
-      # -- useful when the release commit's diff to the current default
-      # branch tip includes .github/workflows/* changes, in which case
-      # GitHub requires the token to be authorized for workflows and the
-      # default GITHUB_TOKEN explicitly cannot be (see the "Create a
-      # release" REST API docs). With skip-github-release: true the
-      # action still updates the manifest and CHANGELOG PR; the operator
-      # creates the GitHub Release + tag out-of-band (e.g. with an admin
-      # PAT). release_created output remains false in that case, so any
+      # behavior). Set true to skip POST /repos/{owner}/{repo}/releases --
+      # useful whenever the release's target commit is no longer the
+      # default branch's HEAD (e.g. a prior run failed after the release
+      # PR merged, and the branch has since moved on). GITHUB_TOKEN can
+      # only tag the HEAD commit; tagging any other commit additionally
+      # requires `workflows: write`, a permission GITHUB_TOKEN cannot be
+      # granted at all (see the "Create a release" REST API docs) -- so
+      # this 403s regardless of what the release commit's own diff
+      # touches, not just when it happens to include .github/workflows/*
+      # changes. (Root-caused in branchdam-agent's Release Please
+      # incident, 2026-09; see this workflow's own auto-heal step below
+      # for the common case, where a release already exists and only the
+      # PR's label is stuck.) With skip-github-release: true the action
+      # still updates the manifest and CHANGELOG PR; the operator creates
+      # the GitHub Release + tag out-of-band (e.g. with an admin PAT).
+      # release_created output remains false in that case, so any
       # downstream chained job gated on it will skip too.
       skip-github-release:
         required: false
@@ -44,6 +51,89 @@ jobs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
+      # Auto-heal a release PR wedged by the non-HEAD-tag failure documented
+      # on skip-github-release above. release-please tracks its own state via
+      # the "autorelease: pending" -> "autorelease: tagged" label transition
+      # on the release PR; it only advances the label after successfully
+      # creating the GitHub Release. If that POST 403s (because some earlier
+      # run's merge commit is no longer HEAD), the PR is stuck "pending"
+      # forever and every later run retries -- and fails -- the same doomed
+      # call.
+      #
+      # This step covers the common recovery case: an operator has already
+      # created the release out-of-band (as this comment's own
+      # skip-github-release doc suggests), but the PR's label was never
+      # flipped, so release-please keeps retrying anyway. Relabel it so it
+      # stops. It deliberately does NOT create the tag/release itself --
+      # release-please-action's own REST calls create a git ref by POSTing
+      # to /releases with a *new* tag_name, and creating a new ref for a
+      # non-HEAD commit is exactly the call GITHUB_TOKEN cannot make (the
+      # `git push`-then-release-create pair was verified separately, in a
+      # scratch repo, to succeed under GITHUB_TOKEN for a non-HEAD commit --
+      # but only once the tag already exists; correctly deriving *what tag
+      # name* release-please would have chosen is per-repo-config-dependent
+      # -- v-prefix, monorepo component prefixes -- and out of scope here).
+      #
+      # Safety: only relabels when a published release for the PR's own
+      # version exists AND that release's tag points at the PR's own merge
+      # commit. A looser check (label + tag name alone) could relabel a PR
+      # whose release failed for an unrelated reason, silently skipping a
+      # real release -- so the SHA equality check is load-bearing, not
+      # decorative. When no matching release exists yet, this deliberately
+      # leaves the label alone and instead prints the one command an
+      # operator needs to run; the next push then self-heals via the branch
+      # above.
+      - name: Auto-heal a release PR stuck behind a non-HEAD merge commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh pr list --state merged --label "autorelease: pending" \
+            --json number,title,mergeCommit --limit 20 --jq '.[]' \
+            | while IFS= read -r pr; do
+            number=$(jq -r '.number' <<<"$pr")
+            title=$(jq -r '.title' <<<"$pr")
+            merge_sha=$(jq -r '.mergeCommit.oid // empty' <<<"$pr")
+            if [ -z "$merge_sha" ]; then
+              continue
+            fi
+
+            # release-please's own release-PR title format:
+            # "chore(main): release X.Y.Z" (or "chore(<path>): release
+            # X.Y.Z" for a path-scoped package in a monorepo config).
+            version=$(sed -nE 's/^chore\([^)]*\): release (.+)$/\1/p' <<<"$title")
+            if [ -z "$version" ]; then
+              echo "::warning::PR #$number is labeled 'autorelease: pending' but its title ('$title') doesn't match release-please's pattern -- skipping auto-heal for it."
+              continue
+            fi
+
+            # Tag naming (v-prefix or not) is a per-repo config choice; try
+            # both rather than assuming this repo's convention.
+            tag=""
+            tag_sha=""
+            for candidate in "v$version" "$version"; do
+              candidate_sha=$(gh api "repos/$GH_REPO/git/refs/tags/$candidate" --jq '.object.sha' 2>/dev/null || true)
+              if [ -n "$candidate_sha" ]; then
+                tag="$candidate"
+                tag_sha="$candidate_sha"
+                break
+              fi
+            done
+
+            if [ -z "$tag_sha" ]; then
+              echo "::error::Release PR #$number ($version) merged at $merge_sha, but no matching release/tag exists yet. If $merge_sha is no longer this branch's HEAD, GITHUB_TOKEN cannot create it (see this workflow's own skip-github-release comment) -- every run will keep failing here until an operator runs:  gh release create $version --target $merge_sha --generate-notes   Once that release exists, this step self-heals the label on the next push."
+              continue
+            fi
+
+            if [ "$tag_sha" != "$merge_sha" ]; then
+              echo "::warning::PR #$number ($version) is labeled 'autorelease: pending' and tag $tag exists, but it points at $tag_sha, not this PR's own merge commit $merge_sha -- leaving the label alone, this doesn't look like the non-HEAD-tag wedge."
+              continue
+            fi
+
+            echo "PR #$number ($version): a release already exists for tag $tag and matches this PR's merge commit -- relabeling 'autorelease: pending' -> 'autorelease: tagged'."
+            gh pr edit "$number" --remove-label "autorelease: pending" --add-label "autorelease: tagged"
+          done
       - uses: googleapis/release-please-action@v5
         id: release
         with:
