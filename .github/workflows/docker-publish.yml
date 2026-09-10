@@ -21,6 +21,24 @@ on:
         required: false
         type: string
         default: 'linux/amd64,linux/arm64'
+      # Path to the Dockerfile, relative to `context` (the repo root). Default is the
+      # repo-root `Dockerfile`. Set this when a repo publishes more than one image from
+      # the same checkout — e.g. `Dockerfile` for the API, `apps/web/Dockerfile` for the
+      # web frontend. Each distinct Dockerfile must be a separate workflow_call invocation;
+      # build/matrix/cache scoping is namespaced per `image-name`, so two parallel
+      # invocations in the same caller run do not collide.
+      dockerfile:
+        required: false
+        type: string
+        default: 'Dockerfile'
+      # Multiline `key=value` pairs passed to `docker build --build-arg`. Secrets must
+      # NOT be passed this way — build args land in image history/logs regardless of
+      # GitHub secret masking. Use repo variables for publishable tokens that are
+      # inlined into the client bundle by design (e.g. NEXT_PUBLIC_*). Empty by default.
+      build-args:
+        required: false
+        type: string
+        default: ''
     secrets:
       REGISTRY_USERNAME:
         required: false
@@ -44,6 +62,12 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       push: ${{ steps.flags.outputs.push }}
+      # Sanitized image-name usable in job output names, buildx cache scopes, and
+      # artifact names (none of which accept `/`). `s3ntin3l8/pocket-portfolio-tracker`
+      # becomes `s3ntin3l8-pocket-portfolio-tracker`. Without this, two same-run
+      # invocations (e.g. one for `-api`, one for `-web`) would share a cache scope
+      # and step on each other's layers — see build/cache-from below.
+      image-slug: ${{ steps.slug.outputs.slug }}
     steps:
       - name: Resolve push flag
         id: flags
@@ -68,6 +92,12 @@ jobs:
           done
           echo "platforms -> $include"
           echo "matrix={\"include\":$include}" >> "$GITHUB_OUTPUT"
+
+      - name: Derive image slug
+        id: slug
+        env:
+          IMAGE_NAME: ${{ inputs.image-name }}
+        run: echo "slug=$(printf '%s' "$IMAGE_NAME" | tr '/:' '-')" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prepare
@@ -136,25 +166,35 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          file: ${{ inputs.dockerfile }}
+          build-args: ${{ inputs.build-args }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ steps.arch.outputs.slug }}
-          cache-to: type=gha,mode=max,scope=${{ steps.arch.outputs.slug }}
+          # Cache scope is `image-slug` + `arch-slug`. The image-slug dimension only
+          # matters when a caller invokes this workflow more than once in the same run
+          # (one image per invocation); for the typical single-image call the prefix
+          # is just a longer, equally-unique scope.
+          cache-from: type=gha,scope=${{ needs.prepare.outputs.image-slug }}-${{ steps.arch.outputs.slug }}
+          cache-to: type=gha,mode=max,scope=${{ needs.prepare.outputs.image-slug }}-${{ steps.arch.outputs.slug }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ inputs.image-name }},push-by-digest=true,name-canonical=true,push=${{ needs.prepare.outputs.push }}
 
       - name: Export digest
         if: ${{ needs.prepare.outputs.push == 'true' }}
         run: |
-          mkdir -p /tmp/digests
+          # Per-image subdir so two same-run invocations (one per image) never share a
+          # `/tmp/digests` flat namespace — see merge's `docker buildx imagetools create`
+          # below, which globs every file in here and assumes they all belong to this
+          # invocation's `image-name`.
+          mkdir -p "/tmp/digests/${{ needs.prepare.outputs.image-slug }}"
           digest='${{ steps.build.outputs.digest }}'
-          touch "/tmp/digests/${digest#sha256:}"
+          touch "/tmp/digests/${{ needs.prepare.outputs.image-slug }}/${digest#sha256:}"
 
       - name: Upload digest
         if: ${{ needs.prepare.outputs.push == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ steps.arch.outputs.slug }}
-          path: /tmp/digests/*
+          name: digests-${{ needs.prepare.outputs.image-slug }}-${{ steps.arch.outputs.slug }}
+          path: /tmp/digests/${{ needs.prepare.outputs.image-slug }}/*
           if-no-files-found: error
           retention-days: 1
 
@@ -175,8 +215,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: /tmp/digests
-          pattern: digests-*
-          merge-multiple: true
+          # image-slug-scoped so this invocation only pulls digests it produced.
+          # `merge-multiple: false` (the default) is intentional — the digests for
+          # this image land under their own subdir, one file per arch, no flattening.
+          pattern: digests-${{ needs.prepare.outputs.image-slug }}-*
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -218,7 +260,7 @@ jobs:
             type=sha,enable=${{ !inputs.push-release }}
 
       - name: Create and push manifest list
-        working-directory: /tmp/digests
+        working-directory: /tmp/digests/${{ needs.prepare.outputs.image-slug }}
         run: |
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
