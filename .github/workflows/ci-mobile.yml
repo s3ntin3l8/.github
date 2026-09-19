@@ -72,11 +72,11 @@ jobs:
             ./scripts/build-mobile.sh --android-only
           fi
 
-      - name: Run Android Unit Tests
+      - name: Run Android Unit Tests & Release Compile Check
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew testDebugUnitTest
+          ./gradlew testDebugUnitTest compileReleaseKotlin
 
   test-ios:
     name: iOS (Build & Test)
@@ -105,7 +105,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/DerivedData
-          key: ${{ runner.os }}-xcode-deriveddata-${{ hashFiles('ios/**/*.swift', 'ios/**/*.xcodeproj', 'core/go.mod', 'core/go.sum') }}
+          key: ${{ runner.os }}-xcode-deriveddata-${{ hashFiles('ios/**/*.xcodeproj', 'core/go.mod', 'core/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-xcode-deriveddata-
 

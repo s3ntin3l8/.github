@@ -25,8 +25,8 @@ test: ## Run Go core unit tests
 android: ## Assemble Android debug build
 	cd android && if [ -f "./gradlew" ]; then ./gradlew assembleDebug; fi
 
-android-test: ## Run Android unit tests (Debug variant)
-	cd android && if [ -f "./gradlew" ]; then ./gradlew testDebugUnitTest; fi
+android-test: ## Run Android unit tests + release compile check
+	cd android && if [ -f "./gradlew" ]; then ./gradlew testDebugUnitTest compileReleaseKotlin; fi
 
 mobile-build: ## Build mobile native libraries (Android AAR + iOS xcframework)
 	./scripts/build-mobile.sh
