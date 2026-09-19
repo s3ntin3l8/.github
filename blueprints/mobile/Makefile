@@ -29,7 +29,7 @@ android: ## Assemble Android debug build
 	cd android && if [ -f "./gradlew" ]; then ./gradlew assembleDebug; fi
 
 android-test: ## Run Android unit tests + release compile check
-	cd android && if [ -f "./gradlew" ]; then ./gradlew testDebugUnitTest compileReleaseKotlin; fi
+	cd android && if [ -f "./gradlew" ]; then ./gradlew testDebugUnitTest && ./gradlew compileReleaseKotlin; fi
 
 mobile-build: ## Build mobile native libraries (Android AAR + iOS xcframework)
 	./scripts/build-mobile.sh
