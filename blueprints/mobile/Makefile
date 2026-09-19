@@ -3,7 +3,10 @@
 .PHONY: help install-hooks lint test android android-test ios-test mobile-build mobile-build-android mobile-build-ios clean
 
 UNAME_S := $(shell uname -s)
-IOS_DEST := $(shell xcodebuild -showdestinations -project ios/*.xcodeproj -scheme * 2>/dev/null | grep 'platform:iOS Simulator' | grep 'iPhone' | head -1 | sed -n 's/.*id:\([^,]*\).*/id=\1/p')
+PROJECT ?= ios/BranchDamApp.xcodeproj
+SCHEME ?= BranchDamApp
+
+IOS_DEST := $(shell xcodebuild -showdestinations -project '$(PROJECT)' -scheme '$(SCHEME)' 2>/dev/null | grep 'platform:iOS Simulator' | grep 'iPhone' | head -1 | sed -n 's/.*id:\([^,]*\).*/id=\1/p')
 ifeq ($(IOS_DEST),)
 IOS_DEST := platform=iOS Simulator,name=iPhone 16
 endif
@@ -39,7 +42,7 @@ mobile-build-ios: ## Build iOS xcframework library
 
 ios-test: ## Run iOS simulator unit tests
 ifeq ($(UNAME_S),Darwin)
-	xcodebuild test -project ios/*.xcodeproj -scheme * -destination '$(IOS_DEST)' CODE_SIGNING_ALLOWED=NO
+	xcodebuild test -project '$(PROJECT)' -scheme '$(SCHEME)' -destination '$(IOS_DEST)' CODE_SIGNING_ALLOWED=NO
 else
 	@echo "==> Linux detected: xcodebuild is unavailable on Linux."
 endif

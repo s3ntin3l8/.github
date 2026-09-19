@@ -50,9 +50,9 @@ gofmt, `go vet`, `go build`, tests via `gotestsum` (race + coverage + JUnit), Co
 - **Expects:** a `go.mod` at the repo root (or override `go-version-file`).
 
 ### [CI-Mobile](.github/workflows/ci-mobile.yml)
-Native Android and iOS companion application CI with `gomobile` support. Runs JDK 21, `setup-gradle@v6`, Android SDK/NDK, Go module & build caching, Xcode `DerivedData` caching, and simulator-only iOS testing.
+Native Android and iOS companion application CI with `gomobile` support. Runs JDK 21, `setup-gradle@v6`, Android SDK/NDK, Go module & build caching, Xcode `DerivedData` caching, and simulator-only iOS testing on PRs with full multi-slice builds on `main` merges.
 - **Caller permissions:** none beyond the default `contents: read`.
-- **Inputs:** `java-version` (default `'21'`), `android-ndk-version` (default `'25.1.8937393'`), `xcode-version`, `ios-destination`, `ios-scheme`, `ios-project`.
+- **Inputs:** `java-version` (default `'21'`), `android-ndk-version` (default `'25.1.8937393'`), `go-mod-dir` (default `'core'`), `xcode-version`, `ios-destination`, `ios-scheme`, `ios-project`, `ios-slices` (default `'auto'`: all slices on `main`, sim-only on PRs), `upload-aar` (default `false`).
 - **Expects:** `./scripts/build-mobile.sh` and native `android`/`ios` module layout.
 
 ### [CI-Tauri](.github/workflows/ci-tauri.yml)
@@ -245,7 +245,7 @@ These are templates you can copy into your local projects to standardize your de
 
 ### [Mobile Blueprints](blueprints/mobile/)
 - [Makefile](blueprints/mobile/Makefile) - Standard Mobile (Android/iOS/Go) dev environment setup (lint, test, android, android-test, ios-test, mobile-build, clean).
-- [pre-commit.yaml](blueprints/mobile/pre-commit.yaml) - Standard Mobile pre-commit hooks (gofmt, go vet, go mod tidy, detect-secrets).
+- [pre-commit.yaml](blueprints/mobile/pre-commit.yaml) - Standard Mobile pre-commit hooks (gofmt, go vet, go mod tidy, detect-secrets). Generate initial baseline via `detect-secrets scan > .secrets.baseline`.
 
 ## 🛡️ Templates
 - [dependabot.yml](dependabot.yml) - Recommended configuration for weekly dependency updates.
