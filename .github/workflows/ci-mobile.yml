@@ -101,7 +101,8 @@ jobs:
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew testDebugUnitTest compileReleaseKotlin
+          ./gradlew testDebugUnitTest
+          ./gradlew compileReleaseKotlin
 
   test-ios:
     name: iOS (Build & Test)
