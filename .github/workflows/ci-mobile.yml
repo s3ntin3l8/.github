@@ -130,7 +130,7 @@ jobs:
           cache-dependency-path: ${{ inputs.go-mod-dir }}/go.sum
 
       - name: Cache Xcode DerivedData
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/DerivedData
           key: ${{ runner.os }}-xcode-deriveddata-${{ hashFiles('ios/**/*.xcodeproj', format('{0}/go.mod', inputs.go-mod-dir), format('{0}/go.sum', inputs.go-mod-dir)) }}
@@ -143,12 +143,15 @@ jobs:
             echo "::error file=scripts/build-mobile.sh::./scripts/build-mobile.sh is required but not found in repository root"
             exit 1
           fi
-          if [ "${{ inputs.ios-slices }}" = "all" ] || { [ "${{ inputs.ios-slices }}" = "auto" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; }; then
+          if [ "${{ inputs.ios-slices }}" = "all" ] || { [ "${{ inputs.ios-slices }}" = "auto" ] && [ "${{ github.event_name }}" != "pull_request" ]; }; then
             echo "Building all iOS slices (ios, iossimulator, macos)..."
             ./scripts/build-mobile.sh --ios-only
-          else
+          elif [ "${{ inputs.ios-slices }}" = "sim-only" ] || { [ "${{ inputs.ios-slices }}" = "auto" ] && [ "${{ github.event_name }}" = "pull_request" ]; }; then
             echo "Building simulator slice (iossimulator)..."
             ./scripts/build-mobile.sh --ios-sim-only
+          else
+            echo "::error::Invalid ios-slices input: '${{ inputs.ios-slices }}'. Expected 'auto', 'sim-only', or 'all'."
+            exit 1
           fi
 
       - name: Run iOS Unit Tests
