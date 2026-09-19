@@ -112,7 +112,13 @@ jobs:
       - name: Build Go Core xcframework
         run: |
           if [ -f ./scripts/build-mobile.sh ]; then
-            ./scripts/build-mobile.sh --ios-sim-only
+            if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+              echo "Building all iOS slices (ios, iossimulator, macos) for main branch..."
+              ./scripts/build-mobile.sh --ios-only
+            else
+              echo "Building simulator slice (iossimulator) for PR check..."
+              ./scripts/build-mobile.sh --ios-sim-only
+            fi
           fi
 
       - name: Run iOS Unit Tests
