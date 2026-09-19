@@ -1,0 +1,67 @@
+# Standard pre-commit configuration for Native Mobile (Android/iOS/Go) projects.
+# Usage: copy to .pre-commit-config.yaml in project root.
+
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: package-lock\.json|gradle/wrapper/gradle-wrapper\.properties
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+
+  - repo: local
+    hooks:
+      - id: gofmt-core
+        name: gofmt (core)
+        entry: bash -c 'files="$(gofmt -l core/)"; if [ -n "$files" ]; then echo "::error::gofmt needed on core/:"; echo "$files"; exit 1; fi'
+        language: system
+        files: '^core/.*\.go$'
+        pass_filenames: false
+
+      - id: gofmt-root
+        name: gofmt (root)
+        entry: bash -c 'files="$(gofmt -l *.go 2>/dev/null || true)"; if [ -n "$files" ]; then echo "::error::gofmt needed on root:"; echo "$files"; exit 1; fi'
+        language: system
+        files: '^[^/]+\.go$'
+        pass_filenames: false
+
+      - id: govet-core
+        name: go vet (core)
+        entry: bash -c 'cd core && go vet ./...'
+        language: system
+        files: '^core/.*\.go$'
+        pass_filenames: false
+
+      - id: govet-root
+        name: go vet (root)
+        entry: bash -c 'go vet ./...'
+        language: system
+        files: '^[^/]+\.go$'
+        pass_filenames: false
+
+      - id: gomodtidy-core
+        name: go mod tidy check (core)
+        entry: bash -c 'cd core && go mod tidy -diff && git diff --exit-code go.mod go.sum'
+        language: system
+        files: '^core/go\.(mod|sum)$'
+        pass_filenames: false
+
+      - id: gomodtidy-root
+        name: go mod tidy check (root)
+        entry: bash -c 'go mod tidy -diff && git diff --exit-code go.mod go.sum'
+        language: system
+        files: '^go\.(mod|sum)$'
+        pass_filenames: false

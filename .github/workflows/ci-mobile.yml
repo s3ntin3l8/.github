@@ -1,0 +1,166 @@
+name: Mobile CI (Android & iOS)
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: "JDK version for Android build (default: '21')"
+        required: false
+        type: string
+        default: '21'
+      android-ndk-version:
+        description: "Android NDK version (default: '25.1.8937393')"
+        required: false
+        type: string
+        default: '25.1.8937393'
+      go-mod-dir:
+        description: "Directory containing go.mod (default: 'core')"
+        required: false
+        type: string
+        default: 'core'
+      xcode-version:
+        description: "Xcode version path (e.g. '/Applications/Xcode_15.4.app/Contents/Developer')"
+        required: false
+        type: string
+        default: '/Applications/Xcode_15.4.app/Contents/Developer'
+      ios-destination:
+        description: "xcodebuild test destination (default: 'platform=iOS Simulator,name=iPhone 16')"
+        required: false
+        type: string
+        default: 'platform=iOS Simulator,name=iPhone 16'
+      ios-scheme:
+        description: "Xcode scheme for iOS tests (default: 'BranchDamApp')"
+        required: false
+        type: string
+        default: 'BranchDamApp'
+      ios-project:
+        description: "Xcode project path (default: 'ios/BranchDamApp.xcodeproj')"
+        required: false
+        type: string
+        default: 'ios/BranchDamApp.xcodeproj'
+      ios-slices:
+        description: "iOS framework slices to build: 'auto' (all on main, sim-only on PR), 'sim-only', or 'all' (default: 'auto')"
+        required: false
+        type: string
+        default: 'auto'
+      upload-aar:
+        description: "Whether to upload the built AAR as a workflow artifact (default: false)"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  test-android:
+    name: Android (Build & Test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v6
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ inputs.go-mod-dir }}/go.mod
+          cache-dependency-path: ${{ inputs.go-mod-dir }}/go.sum
+
+      - name: Set up Android SDK & NDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0 ndk;${{ inputs.android-ndk-version }}"
+
+      - name: Build Go Core AAR
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ inputs.android-ndk-version }}
+        run: |
+          if [ ! -f ./scripts/build-mobile.sh ]; then
+            echo "::error file=scripts/build-mobile.sh::./scripts/build-mobile.sh is required but not found in repository root"
+            exit 1
+          fi
+          ./scripts/build-mobile.sh --android-only
+
+      - name: Upload Built AAR (optional)
+        if: ${{ inputs.upload-aar }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: branchdam-aar
+          path: android/app/libs/branchdam.aar
+          if-no-files-found: warn
+
+      - name: Run Android Unit Tests & Release Compile Check
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest compileReleaseKotlin
+
+  test-ios:
+    name: iOS (Build & Test)
+    runs-on: macos-14
+    timeout-minutes: 30
+    env:
+      GOTOOLCHAIN: auto
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select Xcode
+        run: |
+          if [ -d "${{ inputs.xcode-version }}" ]; then
+            sudo xcode-select -s "${{ inputs.xcode-version }}"
+          else
+            echo "::error::Requested Xcode version not found at: ${{ inputs.xcode-version }}"
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ inputs.go-mod-dir }}/go.mod
+          cache-dependency-path: ${{ inputs.go-mod-dir }}/go.sum
+
+      - name: Cache Xcode DerivedData
+        uses: actions/cache@v6
+        with:
+          path: build/DerivedData
+          key: ${{ runner.os }}-xcode-deriveddata-${{ hashFiles('ios/**/*.xcodeproj', format('{0}/go.mod', inputs.go-mod-dir), format('{0}/go.sum', inputs.go-mod-dir)) }}
+          restore-keys: |
+            ${{ runner.os }}-xcode-deriveddata-
+
+      - name: Build Go Core xcframework
+        run: |
+          if [ ! -f ./scripts/build-mobile.sh ]; then
+            echo "::error file=scripts/build-mobile.sh::./scripts/build-mobile.sh is required but not found in repository root"
+            exit 1
+          fi
+          if [ "${{ inputs.ios-slices }}" = "all" ] || { [ "${{ inputs.ios-slices }}" = "auto" ] && [ "${{ github.event_name }}" != "pull_request" ]; }; then
+            echo "Building all iOS slices (ios, iossimulator, macos)..."
+            ./scripts/build-mobile.sh --ios-only
+          elif [ "${{ inputs.ios-slices }}" = "sim-only" ] || { [ "${{ inputs.ios-slices }}" = "auto" ] && [ "${{ github.event_name }}" = "pull_request" ]; }; then
+            echo "Building simulator slice (iossimulator)..."
+            ./scripts/build-mobile.sh --ios-sim-only
+          else
+            echo "::error::Invalid ios-slices input: '${{ inputs.ios-slices }}'. Expected 'auto', 'sim-only', or 'all'."
+            exit 1
+          fi
+
+      - name: Run iOS Unit Tests
+        run: |
+          xcodebuild test \
+            -project "${{ inputs.ios-project }}" \
+            -scheme "${{ inputs.ios-scheme }}" \
+            -destination "${{ inputs.ios-destination }}" \
+            -derivedDataPath build/DerivedData \
+            -quiet \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
