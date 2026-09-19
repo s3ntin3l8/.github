@@ -1,0 +1,45 @@
+# Standard pre-commit configuration for Native Mobile (Android/iOS/Go) projects.
+# Usage: copy to .pre-commit-config.yaml in project root.
+
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: package-lock\.json|gradle/wrapper/gradle-wrapper\.properties
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+
+  - repo: local
+    hooks:
+      - id: gofmt-core
+        name: gofmt (core)
+        entry: gofmt -l -w
+        language: system
+        files: '^core/.*\.go$'
+
+      - id: govet-core
+        name: go vet (core)
+        entry: bash -c 'cd core && go vet ./...'
+        language: system
+        files: '^core/.*\.go$'
+        pass_filenames: false
+
+      - id: gomodtidy-core
+        name: go mod tidy check (core)
+        entry: bash -c 'cd core && go mod tidy && git diff --exit-code go.mod go.sum'
+        language: system
+        files: '^core/go\.(mod|sum)$'
+        pass_filenames: false

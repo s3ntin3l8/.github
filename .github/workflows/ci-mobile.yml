@@ -1,0 +1,127 @@
+name: Mobile CI (Android & iOS)
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: "JDK version for Android build (default: '21')"
+        required: false
+        type: string
+        default: '21'
+      android-ndk-version:
+        description: "Android NDK version (default: '25.1.8937393')"
+        required: false
+        type: string
+        default: '25.1.8937393'
+      xcode-version:
+        description: "Xcode version path (e.g. '/Applications/Xcode_15.4.app/Contents/Developer')"
+        required: false
+        type: string
+        default: '/Applications/Xcode_15.4.app/Contents/Developer'
+      ios-destination:
+        description: "xcodebuild test destination (default: 'platform=iOS Simulator,name=iPhone 16')"
+        required: false
+        type: string
+        default: 'platform=iOS Simulator,name=iPhone 16'
+      ios-scheme:
+        description: "Xcode scheme for iOS tests (default: 'BranchDamApp')"
+        required: false
+        type: string
+        default: 'BranchDamApp'
+      ios-project:
+        description: "Xcode project path (default: 'ios/BranchDamApp.xcodeproj')"
+        required: false
+        type: string
+        default: 'ios/BranchDamApp.xcodeproj'
+
+jobs:
+  test-android:
+    name: Android (Build & Test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: core/go.mod
+          cache-dependency-path: core/go.sum
+
+      - name: Set up Android SDK & NDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0 ndk;${{ inputs.android-ndk-version }}"
+
+      - name: Build Go Core AAR
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ inputs.android-ndk-version }}
+        run: |
+          if [ -f ./scripts/build-mobile.sh ]; then
+            ./scripts/build-mobile.sh --android-only
+          fi
+
+      - name: Run Android Unit Tests
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest
+
+  test-ios:
+    name: iOS (Build & Test)
+    runs-on: macos-14
+    timeout-minutes: 30
+    env:
+      GOTOOLCHAIN: auto
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Select Xcode
+        run: |
+          if [ -d "${{ inputs.xcode-version }}" ]; then
+            sudo xcode-select -s "${{ inputs.xcode-version }}"
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: core/go.mod
+          cache-dependency-path: core/go.sum
+
+      - name: Cache Xcode DerivedData
+        uses: actions/cache@v4
+        with:
+          path: build/DerivedData
+          key: ${{ runner.os }}-xcode-deriveddata-${{ hashFiles('ios/**/*.swift', 'ios/**/*.xcodeproj', 'core/go.mod', 'core/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-xcode-deriveddata-
+
+      - name: Build Go Core xcframework
+        run: |
+          if [ -f ./scripts/build-mobile.sh ]; then
+            ./scripts/build-mobile.sh --ios-sim-only
+          fi
+
+      - name: Run iOS Unit Tests
+        run: |
+          xcodebuild test \
+            -project "${{ inputs.ios-project }}" \
+            -scheme "${{ inputs.ios-scheme }}" \
+            -destination "${{ inputs.ios-destination }}" \
+            -derivedDataPath build/DerivedData \
+            -quiet \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO

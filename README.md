@@ -49,6 +49,12 @@ gofmt, `go vet`, `go build`, tests via `gotestsum` (race + coverage + JUnit), Co
 - **Pre-build hook:** if a `.github/ci-prebuild.sh` exists in the repo, it runs before build (e.g. to stub `//go:embed` assets). Keep that logic in the script — there is no command-string input.
 - **Expects:** a `go.mod` at the repo root (or override `go-version-file`).
 
+### [CI-Mobile](.github/workflows/ci-mobile.yml)
+Native Android and iOS companion application CI with `gomobile` support. Runs JDK 21, `setup-gradle@v6`, Android SDK/NDK, Go module & build caching, Xcode `DerivedData` caching, and simulator-only iOS testing.
+- **Caller permissions:** none beyond the default `contents: read`.
+- **Inputs:** `java-version` (default `'21'`), `android-ndk-version` (default `'25.1.8937393'`), `xcode-version`, `ios-destination`, `ios-scheme`, `ios-project`.
+- **Expects:** `./scripts/build-mobile.sh` and native `android`/`ios` module layout.
+
 ### [CI-Tauri](.github/workflows/ci-tauri.yml)
 `cargo fmt --check`, `cargo clippy`, `cargo test`, optional coverage via `cargo-llvm-cov` + Codecov, `cargo audit`, plus a separate 3-OS build-verification matrix (Tauri, unlike Go, cannot cross-compile a GUI app from one host — WebView2/WKWebView/webkit2gtk are genuinely per-platform).
 - **Caller permissions:** none beyond the default `contents: read`.
@@ -236,6 +242,10 @@ These are templates you can copy into your local projects to standardize your de
 ### [Tauri Blueprints](blueprints/tauri/)
 - [Makefile](blueprints/tauri/Makefile) - Standard Tauri v2 dev environment setup (lint, fmt, test, build, dev, vulncheck, clean).
 - [pre-commit.yaml](blueprints/tauri/pre-commit.yaml) - Standard Tauri v2 pre-commit hooks (cargo fmt, cargo clippy, cargo test). See [`tauri-app-template`](https://github.com/s3ntin3l8/tauri-app-template) for a full working example these are extracted from.
+
+### [Mobile Blueprints](blueprints/mobile/)
+- [Makefile](blueprints/mobile/Makefile) - Standard Mobile (Android/iOS/Go) dev environment setup (lint, test, android, android-test, ios-test, mobile-build, clean).
+- [pre-commit.yaml](blueprints/mobile/pre-commit.yaml) - Standard Mobile pre-commit hooks (gofmt, go vet, go mod tidy, detect-secrets).
 
 ## 🛡️ Templates
 - [dependabot.yml](dependabot.yml) - Recommended configuration for weekly dependency updates.
