@@ -26,9 +26,17 @@ repos:
     hooks:
       - id: gofmt-core
         name: gofmt (core)
-        entry: gofmt -l -w
+        entry: bash -c 'files="$(gofmt -l core/)"; if [ -n "$files" ]; then echo "::error::gofmt needed on core/:"; echo "$files"; exit 1; fi'
         language: system
         files: '^core/.*\.go$'
+        pass_filenames: false
+
+      - id: gofmt-root
+        name: gofmt (root)
+        entry: bash -c 'files="$(gofmt -l *.go 2>/dev/null || true)"; if [ -n "$files" ]; then echo "::error::gofmt needed on root:"; echo "$files"; exit 1; fi'
+        language: system
+        files: '^[^/]+\.go$'
+        pass_filenames: false
 
       - id: govet-core
         name: go vet (core)
@@ -37,9 +45,23 @@ repos:
         files: '^core/.*\.go$'
         pass_filenames: false
 
+      - id: govet-root
+        name: go vet (root)
+        entry: bash -c 'go vet ./...'
+        language: system
+        files: '^[^/]+\.go$'
+        pass_filenames: false
+
       - id: gomodtidy-core
         name: go mod tidy check (core)
-        entry: bash -c 'cd core && go mod tidy && git diff --exit-code go.mod go.sum'
+        entry: bash -c 'cd core && go mod tidy -diff && git diff --exit-code go.mod go.sum'
         language: system
         files: '^core/go\.(mod|sum)$'
+        pass_filenames: false
+
+      - id: gomodtidy-root
+        name: go mod tidy check (root)
+        entry: bash -c 'go mod tidy -diff && git diff --exit-code go.mod go.sum'
+        language: system
+        files: '^go\.(mod|sum)$'
         pass_filenames: false
