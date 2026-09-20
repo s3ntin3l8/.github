@@ -92,7 +92,7 @@ jobs:
           awk -v got="$pct" -v need="$COVERAGE_FAIL_UNDER" \
             'BEGIN { if (got+0 < need+0) { printf "::error::coverage %.2f%% below threshold %.2f%%\n", got, need; exit 1 } }'
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.txt

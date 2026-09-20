@@ -142,7 +142,7 @@ jobs:
         run: echo "slug=$(printf '%s' '${{ matrix.platform }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
 
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.release-tag || github.ref }}
 
