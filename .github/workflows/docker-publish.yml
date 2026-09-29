@@ -26,6 +26,13 @@ on:
         required: false
         type: boolean
         default: false
+      release-channel:
+        required: false
+        type: choice
+        options:
+          - stable
+          - beta
+        default: stable
   workflow_call:
     inputs:
       image-name:
@@ -39,6 +46,12 @@ on:
         required: false
         type: boolean
         default: false
+      # Stable releases publish the immutable semver tags plus `latest`; beta
+      # releases publish their semver prerelease tag plus the moving `beta` tag.
+      release-channel:
+        required: false
+        type: string
+        default: stable
       release-tag:
         required: false
         type: string
@@ -96,7 +109,20 @@ jobs:
     steps:
       - name: Resolve push flag
         id: flags
-        run: echo "push=${{ inputs.push-edge || inputs.push-release }}" >> "$GITHUB_OUTPUT"
+        env:
+          PUSH_EDGE: ${{ inputs.push-edge }}
+          PUSH_RELEASE: ${{ inputs.push-release }}
+          RELEASE_CHANNEL: ${{ inputs.release-channel }}
+        run: |
+          if [[ "$PUSH_RELEASE" == "true" && "$RELEASE_CHANNEL" != "stable" && "$RELEASE_CHANNEL" != "beta" ]]; then
+            echo "::error::release-channel must be stable or beta when push-release is true"
+            exit 1
+          fi
+          if [[ "$PUSH_EDGE" == "true" || "$PUSH_RELEASE" == "true" ]]; then
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build platform -> runner matrix
         id: matrix
@@ -295,17 +321,26 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ inputs.image-name }}
           tags: |
             type=raw,value=edge,enable=${{ inputs.push-edge }}
-            type=semver,pattern={{version}},value=${{ inputs.release-tag }},enable=${{ inputs.push-release }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.release-tag }},enable=${{ inputs.push-release }}
-            type=raw,value=latest,enable=${{ inputs.push-release }}
+            type=semver,pattern={{version}},value=${{ inputs.release-tag }},enable=${{ inputs.push-release && inputs.release-channel == 'stable' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.release-tag }},enable=${{ inputs.push-release && inputs.release-channel == 'stable' }}
+            type=raw,value=latest,enable=${{ inputs.push-release && inputs.release-channel == 'stable' }}
+            type=semver,pattern={{version}},value=${{ inputs.release-tag }},enable=${{ inputs.push-release && inputs.release-channel == 'beta' }}
+            type=raw,value=beta,enable=${{ inputs.push-release && inputs.release-channel == 'beta' }}
             type=sha,enable=${{ !inputs.push-release }}
 
       - name: Create and push manifest list
         working-directory: /tmp/digests/${{ needs.prepare.outputs.image-slug }}
         run: |
-          docker buildx imagetools create \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ inputs.image-name }}@sha256:%s ' *)
+          mapfile -t tags < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          digest_args=()
+          for digest_file in *; do
+            digest_args+=("${{ env.REGISTRY }}/${{ inputs.image-name }}@sha256:${digest_file}")
+          done
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            tag_args+=("-t" "$tag")
+          done
+          docker buildx imagetools create "${tag_args[@]}" "${digest_args[@]}"
 
       - name: Sign the published Docker image
         env:
@@ -314,4 +349,6 @@ jobs:
         run: |
           DIGEST=$(docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ inputs.image-name }}:${VERSION}" \
             --format '{{json .Manifest.Digest}}' | tr -d '"')
-          echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
+          while IFS= read -r tag; do
+            cosign sign --yes "${tag}@${DIGEST}"
+          done <<< "$TAGS"
