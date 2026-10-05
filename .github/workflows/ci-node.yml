@@ -164,16 +164,18 @@ jobs:
       WD_PREFIX: ${{ inputs.working-directory == '.' && '' || format('{0}/', inputs.working-directory) }}
       SHARDED: ${{ fromJSON(inputs.test-shards) > 1 }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'npm'
           cache-dependency-path: ${{ inputs.cache-dependency-path }}
       - name: Cache Turbo
         if: ${{ inputs.turbo-cache }}
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ format('{0}**/.turbo', env.WD_PREFIX) }}
           key: turbo-${{ runner.os }}-${{ github.sha }}
@@ -198,7 +200,7 @@ jobs:
       # images.
       - name: Set up Python (for detect-secrets)
         if: ${{ hashFiles('.secrets.baseline') != '' }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.x'
       # `pip install detect-secrets==1.5.0` below was previously uncached,
@@ -216,7 +218,7 @@ jobs:
       # to the same warmed cache on next miss).
       - name: Cache pip (detect-secrets)
         if: ${{ hashFiles('.secrets.baseline') != '' }}
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/pip
           key: pip-detect-secrets-${{ runner.os }}
@@ -323,7 +325,7 @@ jobs:
         # coverage configured.
         if: ${{ env.SHARDED == 'false' && steps.probe.outputs.has_coverage == 'true' }}
         continue-on-error: true  # reporting only; a Codecov outage must not fail CI
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           directory: ${{ format('{0}coverage', env.WD_PREFIX) }}
@@ -335,7 +337,7 @@ jobs:
         # jest: jest-junit). Uploaded even on test failure (the point of Analytics).
         if: ${{ env.SHARDED == 'false' && !cancelled() && steps.probe.outputs.has_junit == 'true' }}
         continue-on-error: true  # reporting only; a Codecov outage must not fail CI
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           report_type: test_results
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -377,16 +379,18 @@ jobs:
       matrix:
         shard: ${{ fromJSON(needs.shard-plan.outputs.shards) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'npm'
           cache-dependency-path: ${{ inputs.cache-dependency-path }}
       - name: Cache Turbo
         if: ${{ inputs.turbo-cache }}
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ inputs.working-directory == '.' && '' || format('{0}/', inputs.working-directory) }}**/.turbo
           key: turbo-${{ runner.os }}-${{ github.sha }}
@@ -436,7 +440,7 @@ jobs:
         # wrong (shards cover disjoint file sets, not equal-sized samples of the same
         # files). Requires the caller's coverage reporter list to include "json".
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-shard-${{ matrix.shard }}
           path: |
@@ -472,7 +476,9 @@ jobs:
       # report (path mismatch / source code unavailable) — silent since the
       # upload step itself has fail_ci_if_error: false, so CI stays green while
       # every commit's coverage (and any PR diffed against it as a base) is lost.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - name: Fail if any shard failed
         # `needs: test-shard` without this check would leave test-merge simply not
         # running (shown as "skipped") when a shard fails — a skipped required check
@@ -482,7 +488,7 @@ jobs:
         run: |
           echo "::error::One or more test shards failed (needs.test-shard.result=${{ needs.test-shard.result }})."
           exit 1
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: coverage-shard-*
           path: ${{ inputs.working-directory }}/.shard-artifacts
@@ -523,7 +529,7 @@ jobs:
             'BEGIN { if (got+0 < need+0) { printf "::error::coverage %.1f%% below threshold %s%%\n", got, need; exit 1 } }'
       - name: Upload coverage to Codecov
         continue-on-error: true  # reporting only; a Codecov outage must not fail CI
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           directory: ${{ format('{0}coverage', env.WD_PREFIX) }}
@@ -532,7 +538,7 @@ jobs:
       - name: Upload test results to Codecov (Test Analytics)
         if: ${{ !cancelled() }}
         continue-on-error: true  # reporting only; a Codecov outage must not fail CI
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           report_type: test_results
           token: ${{ secrets.CODECOV_TOKEN }}

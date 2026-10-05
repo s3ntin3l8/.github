@@ -168,18 +168,19 @@ jobs:
         run: echo "slug=$(printf '%s' '${{ matrix.platform }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
 
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.release-tag || github.ref }}
+          persist-credentials: false
 
       # Only needed for the fallback case (a non-amd64 platform pinned to an amd64 runner).
       # Native amd64/arm64 builds skip this entirely.
       - name: Set up QEMU
         if: ${{ matrix.runner == 'ubuntu-24.04' && matrix.platform != 'linux/amd64' }}
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # docker/login-action has no retry, and ghcr.io intermittently answers
       # `GET /v2/` with `denied: denied` under load -- observed 2026-08-18, where
@@ -208,13 +209,13 @@ jobs:
 
       - name: Extract metadata (labels)
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ inputs.image-name }}
 
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ${{ inputs.dockerfile }}
@@ -244,7 +245,7 @@ jobs:
 
       - name: Upload digest
         if: ${{ needs.prepare.outputs.push == 'true' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           # Double-dash delimiter, not single: `image-slug` isn't guaranteed
           # collision-free under a single-dash join. A repo publishing both
@@ -272,7 +273,7 @@ jobs:
 
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           # `download-artifact@v4` extracts each matched artifact into its own
           # subdirectory named after the artifact (e.g.
@@ -288,10 +289,10 @@ jobs:
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3.5.0
+        uses: sigstore/cosign-installer@59acb6260d9c0ba8f4a2f9d9b48431a222b68e20 # v3.5.0
 
       # See the build job's identically-named step for why this isn't
       # docker/login-action -- same rationale applies here.
@@ -316,7 +317,7 @@ jobs:
 
       - name: Extract metadata (tags)
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ inputs.image-name }}
           tags: |

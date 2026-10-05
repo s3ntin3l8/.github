@@ -233,7 +233,7 @@ jobs:
     steps:
       - name: Create GitHub App token (runner-side, for trigger resolution)
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
           app-id: ${{ secrets.HERMES_APP_ID }}
           private-key: ${{ secrets.HERMES_APP_PRIVATE_KEY }}
@@ -367,7 +367,7 @@ jobs:
       # ("not a directory"). Disable cone mode so file paths work.
       - name: Checkout shared repo (prompt source)
         if: steps.check-mention.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: s3ntin3l8/.github
           ref: main
@@ -376,6 +376,7 @@ jobs:
           sparse-checkout: |
             ${{ inputs.prompt-path }}
             ${{ inputs.issue-prompt-path }}
+          persist-credentials: false
 
       # Fail fast if the Hermes API server itself is unreachable, BEFORE attempting the
       # relay below. /health requires no auth and responds in milliseconds when the
