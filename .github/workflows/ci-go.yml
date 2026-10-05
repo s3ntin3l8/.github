@@ -104,8 +104,9 @@ jobs:
         # gotestsum JUnit report exists.
         if: ${{ !cancelled() && hashFiles('junit.xml') != '' }}
         continue-on-error: true  # reporting only; a Codecov outage must not fail CI
-        uses: codecov/test-results-action@v1
+        uses: codecov/codecov-action@v7
         with:
+          report_type: test_results
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./junit.xml
           flags: go
