@@ -161,7 +161,7 @@ jobs:
     # with the default test-shards=1 this job's step list and behavior are unchanged
     # from before test-shards existed.
     env:
-      WD_PREFIX: ${{ inputs.working-directory == '.' && '' || format('{0}/', inputs.working-directory) }}
+      WD_PREFIX: ${{ format('{0}/', inputs.working-directory) }}
       SHARDED: ${{ fromJSON(inputs.test-shards) > 1 }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -392,7 +392,7 @@ jobs:
         if: ${{ inputs.turbo-cache }}
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: ${{ inputs.working-directory == '.' && '' || format('{0}/', inputs.working-directory) }}**/.turbo
+          path: ${{ format('{0}/', inputs.working-directory) }}**/.turbo
           key: turbo-${{ runner.os }}-${{ github.sha }}
           restore-keys: |
             turbo-${{ runner.os }}-
@@ -465,7 +465,7 @@ jobs:
       run:
         working-directory: ${{ inputs.working-directory }}
     env:
-      WD_PREFIX: ${{ inputs.working-directory == '.' && '' || format('{0}/', inputs.working-directory) }}
+      WD_PREFIX: ${{ format('{0}/', inputs.working-directory) }}
     steps:
       # Unlike lint-and-test/test-shard, this job doesn't need source to merge
       # coverage or run tests — but codecov/codecov-action does need a real git
@@ -522,9 +522,10 @@ jobs:
         if: ${{ inputs.coverage-fail-under != '0' }}
         env:
           COVERAGE_FAIL_UNDER: ${{ inputs.coverage-fail-under }}
+          TEST_SHARDS: ${{ inputs.test-shards }}
         run: |
           pct=$(jq '.total.lines.pct' coverage/coverage-summary.json)
-          echo "Total line coverage (merged across ${{ inputs.test-shards }} shards): ${pct}%"
+          echo "Total line coverage (merged across ${TEST_SHARDS} shards): ${pct}%"
           awk -v got="$pct" -v need="$COVERAGE_FAIL_UNDER" \
             'BEGIN { if (got+0 < need+0) { printf "::error::coverage %.1f%% below threshold %s%%\n", got, need; exit 1 } }'
       - name: Upload coverage to Codecov
