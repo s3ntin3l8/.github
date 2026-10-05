@@ -86,6 +86,10 @@ on:
 env:
   REGISTRY: ghcr.io
 
+# Deny by default; each job below declares exactly what it needs (build and merge:
+# contents read, packages write, id-token write -- the caller's required set).
+permissions: {}
+
 # Build each architecture natively (no QEMU emulation) on its own runner, push each
 # as a by-digest image, then assemble a multi-arch manifest list in a final merge job.
 # This replaces the previous single-job buildx build, where the arm64 leg ran under
@@ -165,7 +169,9 @@ jobs:
     steps:
       - name: Architecture slug
         id: arch
-        run: echo "slug=$(printf '%s' '${{ matrix.platform }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: echo "slug=$(printf '%s' "$PLATFORM" | tr '/' '-')" >> "$GITHUB_OUTPUT"
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -234,13 +240,14 @@ jobs:
         if: ${{ needs.prepare.outputs.push == 'true' }}
         env:
           IMAGE_SLUG: ${{ needs.prepare.outputs.image-slug }}
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           # Per-image subdir so two same-run invocations (one per image) never share a
           # `/tmp/digests` flat namespace — see merge's `docker buildx imagetools create`
           # below, which globs every file in here and assumes they all belong to this
           # invocation's `image-name`.
           mkdir -p "/tmp/digests/${IMAGE_SLUG}"
-          digest='${{ steps.build.outputs.digest }}'
+          digest="$BUILD_DIGEST"
           touch "/tmp/digests/${IMAGE_SLUG}/${digest#sha256:}"
 
       - name: Upload digest
@@ -330,12 +337,15 @@ jobs:
             type=sha,enable=${{ !inputs.push-release }}
 
       - name: Create and push manifest list
-        working-directory: /tmp/digests/${{ needs.prepare.outputs.image-slug }}
+        env:
+          IMAGE_SLUG: ${{ needs.prepare.outputs.image-slug }}
+          IMAGE_NAME: ${{ inputs.image-name }}
         run: |
+          cd "/tmp/digests/${IMAGE_SLUG}"
           mapfile -t tags < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
           digest_args=()
           for digest_file in *; do
-            digest_args+=("${{ env.REGISTRY }}/${{ inputs.image-name }}@sha256:${digest_file}")
+            digest_args+=("${REGISTRY}/${IMAGE_NAME}@sha256:${digest_file}")
           done
           tag_args=()
           for tag in "${tags[@]}"; do
@@ -347,8 +357,9 @@ jobs:
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
           VERSION: ${{ steps.meta.outputs.version }}
+          IMAGE_NAME: ${{ inputs.image-name }}
         run: |
-          DIGEST=$(docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ inputs.image-name }}:${VERSION}" \
+          DIGEST=$(docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${VERSION}" \
             --format '{{json .Manifest.Digest}}' | tr -d '"')
           while IFS= read -r tag; do
             cosign sign --yes "${tag}@${DIGEST}"
