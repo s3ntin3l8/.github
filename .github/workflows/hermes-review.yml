@@ -237,6 +237,11 @@ jobs:
         with:
           app-id: ${{ secrets.HERMES_APP_ID }}
           private-key: ${{ secrets.HERMES_APP_PRIVATE_KEY }}
+          # Least privilege: this token is only used by the re-trigger guard, which
+          # reads reviews (pulls/N/reviews) and comments (issues/N/comments). The agent
+          # mints its own full token via scripts/app-token.sh.
+          permission-pull-requests: read
+          permission-issues: read
 
       # Early exit unless the comment actually contains the configured mention.
       # ONLY enforced in on-demand mode. In auto mode the caller's `on:` decides when
@@ -275,11 +280,14 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
+          IS_PR_COMMENT: ${{ github.event.issue.pull_request != null && github.event_name == 'issue_comment' }}
+          IS_PR_REVIEW: ${{ github.event_name == 'pull_request_review_comment' }}
+          IS_PR_EVENT: ${{ github.event_name == 'pull_request' }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          EVENT_REVIEW_COMMENT_PR_NUMBER: ${{ github.event.pull_request_review_comment.pull_request_number }}
         run: |
           set -euo pipefail
-          IS_PR_COMMENT="${{ github.event.issue.pull_request != null && github.event_name == 'issue_comment' }}"
-          IS_PR_REVIEW="${{ github.event_name == 'pull_request_review_comment' }}"
-          IS_PR_EVENT="${{ github.event_name == 'pull_request' }}"
           # Resolve the PR number EXPLICITLY per event type. Do NOT use a cross-event
           # `||` chain like `github.event.issue.number || github.event.pull_request.number`:
           # for a `pull_request` event github.event.issue is undefined, and that chain
@@ -287,19 +295,19 @@ jobs:
           # "most recent PR" — which can land on the WRONG repo (s3ntin3l8/.github#28
           # follow-up: auto-review on claude-remote-session reviewed pocket-portfolio-tracker#543).
           if [[ "$IS_PR_EVENT" == "true" ]]; then
-            PR_NUM="${{ github.event.pull_request.number }}"
+            PR_NUM="$EVENT_PR_NUMBER"
           elif [[ "$IS_PR_COMMENT" == "true" ]]; then
             # PR-conversation comment: the PR number is the issue number itself.
-            PR_NUM="${{ github.event.issue.number }}"
+            PR_NUM="$EVENT_ISSUE_NUMBER"
           elif [[ "$IS_PR_REVIEW" == "true" ]]; then
-            PR_NUM="${{ github.event.pull_request_review_comment.pull_request_number }}"
+            PR_NUM="$EVENT_REVIEW_COMMENT_PR_NUMBER"
           fi
           if [[ -n "${PR_NUM:-}" ]]; then
             echo "kind=pr"         >> "$GITHUB_OUTPUT"
             echo "number=$PR_NUM" >> "$GITHUB_OUTPUT"
           else
             # Plain issue comment (no PR linked).
-            ISSUE_NUM="${{ github.event.issue.number }}"
+            ISSUE_NUM="$EVENT_ISSUE_NUMBER"
             echo "kind=issue"        >> "$GITHUB_OUTPUT"
             echo "number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
           fi
