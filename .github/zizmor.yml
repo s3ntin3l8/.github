@@ -1,0 +1,15 @@
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "*": hash-pin
+        # The ref IS the input: `@stable` selects the toolchain channel and
+        # `@cargo-llvm-cov` / `@cargo-audit` select which tool to install.
+        # Pinning these to a SHA would change what they do.
+        dtolnay/rust-toolchain: ref-pin
+        taiki-e/install-action: ref-pin
+  artipacked:
+    ignore:
+      # The agent is allowed `git push` (see --allowedTools), so credentials
+      # must persist on this checkout.
+      - claude-code.yml:163
