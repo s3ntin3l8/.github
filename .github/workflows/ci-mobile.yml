@@ -120,11 +120,13 @@ jobs:
           persist-credentials: false
 
       - name: Select Xcode
+        env:
+          XCODE_VERSION: ${{ inputs.xcode-version }}
         run: |
-          if [ -d "${{ inputs.xcode-version }}" ]; then
-            sudo xcode-select -s "${{ inputs.xcode-version }}"
+          if [ -d "${XCODE_VERSION}" ]; then
+            sudo xcode-select -s "${XCODE_VERSION}"
           else
-            echo "::error::Requested Xcode version not found at: ${{ inputs.xcode-version }}"
+            echo "::error::Requested Xcode version not found at: ${XCODE_VERSION}"
             exit 1
           fi
 
@@ -143,28 +145,35 @@ jobs:
             ${{ runner.os }}-xcode-deriveddata-
 
       - name: Build Go Core xcframework
+        env:
+          IOS_SLICES: ${{ inputs.ios-slices }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           if [ ! -f ./scripts/build-mobile.sh ]; then
             echo "::error file=scripts/build-mobile.sh::./scripts/build-mobile.sh is required but not found in repository root"
             exit 1
           fi
-          if [ "${{ inputs.ios-slices }}" = "all" ] || { [ "${{ inputs.ios-slices }}" = "auto" ] && [ "${{ github.event_name }}" != "pull_request" ]; }; then
+          if [ "${IOS_SLICES}" = "all" ] || { [ "${IOS_SLICES}" = "auto" ] && [ "${EVENT_NAME}" != "pull_request" ]; }; then
             echo "Building all iOS slices (ios, iossimulator, macos)..."
             ./scripts/build-mobile.sh --ios-only
-          elif [ "${{ inputs.ios-slices }}" = "sim-only" ] || { [ "${{ inputs.ios-slices }}" = "auto" ] && [ "${{ github.event_name }}" = "pull_request" ]; }; then
+          elif [ "${IOS_SLICES}" = "sim-only" ] || { [ "${IOS_SLICES}" = "auto" ] && [ "${EVENT_NAME}" = "pull_request" ]; }; then
             echo "Building simulator slice (iossimulator)..."
             ./scripts/build-mobile.sh --ios-sim-only
           else
-            echo "::error::Invalid ios-slices input: '${{ inputs.ios-slices }}'. Expected 'auto', 'sim-only', or 'all'."
+            echo "::error::Invalid ios-slices input: '${IOS_SLICES}'. Expected 'auto', 'sim-only', or 'all'."
             exit 1
           fi
 
       - name: Run iOS Unit Tests
+        env:
+          IOS_PROJECT: ${{ inputs.ios-project }}
+          IOS_SCHEME: ${{ inputs.ios-scheme }}
+          IOS_DESTINATION: ${{ inputs.ios-destination }}
         run: |
           xcodebuild test \
-            -project "${{ inputs.ios-project }}" \
-            -scheme "${{ inputs.ios-scheme }}" \
-            -destination "${{ inputs.ios-destination }}" \
+            -project "${IOS_PROJECT}" \
+            -scheme "${IOS_SCHEME}" \
+            -destination "${IOS_DESTINATION}" \
             -derivedDataPath build/DerivedData \
             -quiet \
             CODE_SIGNING_ALLOWED=NO \
