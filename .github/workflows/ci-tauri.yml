@@ -178,6 +178,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: ${{ inputs.coverage }}
+        continue-on-error: true  # reporting only; a Codecov outage must not fail CI
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

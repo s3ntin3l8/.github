@@ -113,6 +113,7 @@ jobs:
             pytest --cov="$COVERAGE_SOURCE" --cov-report=xml --junitxml=junit.xml --cov-fail-under="$COVERAGE_FAIL_UNDER"
           fi
       - name: Upload coverage reports to Codecov
+        continue-on-error: true  # reporting only; a Codecov outage must not fail CI
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -121,6 +122,7 @@ jobs:
         # Upload even when tests FAIL — that is the point of Test Analytics — but
         # skip cleanly when there is no junit.xml (e.g. a lint-only repo with no pytest).
         if: ${{ !cancelled() && hashFiles('junit.xml') != '' }}
+        continue-on-error: true  # reporting only; a Codecov outage must not fail CI
         uses: codecov/test-results-action@v1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
