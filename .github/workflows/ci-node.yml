@@ -322,6 +322,7 @@ jobs:
         # to coverage/). Not an error if absent — the project may not have
         # coverage configured.
         if: ${{ env.SHARDED == 'false' && steps.probe.outputs.has_coverage == 'true' }}
+        continue-on-error: true  # reporting only; a Codecov outage must not fail CI
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -333,6 +334,7 @@ jobs:
         # project (vitest: --reporter=junit --outputFile=./test-results/junit.xml;
         # jest: jest-junit). Uploaded even on test failure (the point of Analytics).
         if: ${{ env.SHARDED == 'false' && !cancelled() && steps.probe.outputs.has_junit == 'true' }}
+        continue-on-error: true  # reporting only; a Codecov outage must not fail CI
         uses: codecov/test-results-action@v1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -519,6 +521,7 @@ jobs:
           awk -v got="$pct" -v need="$COVERAGE_FAIL_UNDER" \
             'BEGIN { if (got+0 < need+0) { printf "::error::coverage %.1f%% below threshold %s%%\n", got, need; exit 1 } }'
       - name: Upload coverage to Codecov
+        continue-on-error: true  # reporting only; a Codecov outage must not fail CI
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -527,6 +530,7 @@ jobs:
           fail_ci_if_error: false
       - name: Upload test results to Codecov (Test Analytics)
         if: ${{ !cancelled() }}
+        continue-on-error: true  # reporting only; a Codecov outage must not fail CI
         uses: codecov/test-results-action@v1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
