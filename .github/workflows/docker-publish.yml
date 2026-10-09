@@ -196,7 +196,7 @@ jobs:
       # Base images (python, node, ...) come from Docker Hub; anonymous pulls from
       # shared runner IPs hit its rate limit (429). Falls back to anonymous when unset.
       - name: Log in to Docker Hub
-        uses: s3ntin3l8/.github/.github/actions/dockerhub-login@ci/dockerhub-login
+        uses: s3ntin3l8/.github/.github/actions/dockerhub-login@main
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           token: ${{ secrets.DOCKERHUB_TOKEN }}

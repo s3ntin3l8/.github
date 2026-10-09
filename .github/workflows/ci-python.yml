@@ -87,7 +87,7 @@ jobs:
       - name: Log in to Docker Hub
         # Anonymous pulls from shared runner IPs hit Docker Hub's rate limit
         # (429); falls back to anonymous when the secrets are absent.
-        uses: s3ntin3l8/.github/.github/actions/dockerhub-login@ci/dockerhub-login
+        uses: s3ntin3l8/.github/.github/actions/dockerhub-login@main
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           token: ${{ secrets.DOCKERHUB_TOKEN }}
