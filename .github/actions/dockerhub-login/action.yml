@@ -1,0 +1,41 @@
+name: Docker Hub login
+description: >
+  Log in to Docker Hub so image pulls use the account's rate-limit quota instead of the
+  runner's shared anonymous one. Never fails the job: with no credentials it pulls
+  anonymously, and a failed login is surfaced as a warning.
+
+inputs:
+  username:
+    description: Docker Hub username (optional)
+    required: false
+    default: ''
+  token:
+    description: Docker Hub access token, read-only scope is enough (optional)
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Log in to Docker Hub
+      shell: bash
+      env:
+        DOCKERHUB_USER: ${{ inputs.username }}
+        DOCKERHUB_PASS: ${{ inputs.token }}
+      run: |
+        if [ -z "$DOCKERHUB_USER" ] || [ -z "$DOCKERHUB_PASS" ]; then
+          echo "::notice::Docker Hub credentials not set - pulling anonymously (rate-limited)"
+          exit 0
+        fi
+        attempts=3
+        for attempt in $(seq 1 "$attempts"); do
+          if printf '%s' "$DOCKERHUB_PASS" \
+             | docker login docker.io -u "$DOCKERHUB_USER" --password-stdin; then
+            exit 0
+          fi
+          if [ "$attempt" -lt "$attempts" ]; then
+            echo "::warning::Docker Hub login attempt ${attempt}/${attempts} failed; retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          fi
+        done
+        echo "::warning::Docker Hub login failed after ${attempts} attempts - continuing anonymously"

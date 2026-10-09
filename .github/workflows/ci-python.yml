@@ -29,6 +29,11 @@ on:
     secrets:
       CODECOV_TOKEN:
         required: false
+      DOCKERHUB_USERNAME:
+        description: "Optional. With DOCKERHUB_TOKEN, authenticates Docker Hub pulls (testcontainers etc.) to avoid the anonymous rate limit."
+        required: false
+      DOCKERHUB_TOKEN:
+        required: false
 
 jobs:
   # Fast, dependency-light feedback: ruff needs no ML/runtime deps, so this
