@@ -82,6 +82,11 @@ on:
         required: false
       REGISTRY_TOKEN:
         required: false
+      DOCKERHUB_USERNAME:
+        description: "Optional. With DOCKERHUB_TOKEN, authenticates base-image pulls from Docker Hub to avoid the anonymous rate limit."
+        required: false
+      DOCKERHUB_TOKEN:
+        required: false
 
 env:
   REGISTRY: ghcr.io
