@@ -29,11 +29,6 @@ on:
     secrets:
       CODECOV_TOKEN:
         required: false
-      DOCKERHUB_USERNAME:
-        description: "Optional. With DOCKERHUB_TOKEN, authenticates Docker Hub pulls (testcontainers etc.) to avoid the anonymous rate limit."
-        required: false
-      DOCKERHUB_TOKEN:
-        required: false
 
 jobs:
   # Fast, dependency-light feedback: ruff needs no ML/runtime deps, so this
@@ -84,13 +79,6 @@ jobs:
           elif [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-      - name: Log in to Docker Hub
-        # Anonymous pulls from shared runner IPs hit Docker Hub's rate limit
-        # (429); falls back to anonymous when the secrets are absent.
-        uses: s3ntin3l8/.github/.github/actions/dockerhub-login@main
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          token: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Type check with mypy
         # Advisory by default (continue-on-error): a repo that has never run mypy
         # would otherwise go instantly red on adoption. Set strict-checks: true
