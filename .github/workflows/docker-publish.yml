@@ -193,6 +193,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
+      # Base images (python, node, ...) come from Docker Hub; anonymous pulls from
+      # shared runner IPs hit its rate limit (429). Falls back to anonymous when unset.
+      - name: Log in to Docker Hub
+        uses: s3ntin3l8/.github/.github/actions/dockerhub-login@3b9d7cfd58090eb37898f24d654a0788f944e090 # main @ 2026-10-10
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          token: ${{ secrets.DOCKERHUB_TOKEN }}
+
       # docker/login-action has no retry, and ghcr.io intermittently answers
       # `GET /v2/` with `denied: denied` under load -- observed 2026-08-18, where
       # the amd64 leg was denied while the arm64 leg of the same run, using the

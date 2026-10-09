@@ -18,7 +18,7 @@ These building blocks allow any repository to implement a robust CI/CD pipeline 
 ### [CI-Python](.github/workflows/ci-python.yml)
 ruff, mypy, pytest+coverage, Codecov (coverage **and** Test Analytics), pip-audit, detect-secrets.
 - **Caller permissions:** none beyond the default `contents: read`.
-- **Secrets:** `CODECOV_TOKEN` (optional) — pass via `secrets: inherit`.
+- **Secrets:** `CODECOV_TOKEN` (optional) — pass via `secrets: inherit`. `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` (optional) authenticate Docker Hub pulls (e.g. testcontainers); without them pulls are anonymous and may hit the rate limit.
 - **Inputs:** `python-version`, `coverage-fail-under`, **`coverage-source`** (set this if your package isn't named `app`).
 - **Expects:** dev tooling installable via `requirements-dev.txt`, **or** a `pyproject.toml`/`setup.py` (installed with `pip install -e ".[dev]"`).
 
@@ -67,7 +67,7 @@ Native Android and iOS companion application CI with `gomobile` support. Runs JD
 ### [Docker-Publish](.github/workflows/docker-publish.yml)
 Multi-arch builds (amd64/arm64), GHCR push, and Cosign signing.
 - **Caller permissions (required):** `contents: read`, `packages: write`, `id-token: write`.
-- **Secrets:** `REGISTRY_USERNAME`/`REGISTRY_TOKEN` (optional; falls back to `GITHUB_TOKEN`) — pass via `secrets: inherit`.
+- **Secrets:** `REGISTRY_USERNAME`/`REGISTRY_TOKEN` (optional; falls back to `GITHUB_TOKEN`) — pass via `secrets: inherit`. `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` (optional) authenticate base-image pulls from Docker Hub; without them pulls are anonymous and may hit the rate limit (429). Use a read-only ("Public Repo Read-only") access token.
 - **Inputs:** `image-name` (required), `push-edge`, `push-release`, `release-tag`, `platforms`.
 
 ### [CodeQL](.github/workflows/codeql.yml)
