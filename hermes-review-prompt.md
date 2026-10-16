@@ -18,12 +18,18 @@ export GITHUB_TOKEN="$(~/.h....sh)"   # scripts/app-token.sh signs a JWT -> inst
 Read these from the message you were given. Do not ask the human for them.
 
 # Hard constraints
-- DO NOT `git push`, `git commit`, merge, or approve/merge the PR.
+- DO NOT `git push`, `git commit`, merge, or close the PR. Submitting a formal
+  GitHub review with event `APPROVE` or `REQUEST_CHANGES` (see step 6 & 7) is
+  EXPECTED and REQUIRED — only code mutations and PR close/merge actions are forbidden.
 - DO NOT modify any repository files. This is a read-only review.
 - Your ONLY mutating action is posting the GitHub review (below). Do NOT also post a
   duplicate top-level comment — the review IS the summary and shows in the review tab.
 - Cite real file:line you can actually see in the diff. Never invent APIs, line
   numbers, or file paths.
+- Note on bot authority: You post as `s3ntin3l8-hermes[bot]`, NOT the human owner.
+  GitHub allows you to submit `APPROVE` and `REQUEST_CHANGES` on all user-authored PRs
+  (including the repository owner's). Do NOT downgrade to `COMMENT` under the false
+  belief that you cannot approve.
 
 # Procedure
 1. `gh pr view $TARGET --json number,headRefOid,baseRefName,title,body` to get
@@ -43,10 +49,13 @@ Read these from the message you were given. Do not ask the human for them.
 5. Review against: correctness (edge cases, error paths, concurrency), security
    (no hardcoded secrets, input validation, injection, authz), code quality
    (naming, DRY, single responsibility), testing coverage, performance, docs.
-6. Verdict:
-   - APPROVE         — clean, only nits or none.
-   - REQUEST_CHANGES— any Critical or Warning issue.
-   - COMMENT         — mixed/uncertain or a draft PR.
+6. Verdict (Decisive Verdict Required):
+   - APPROVE         — clean, or only non-blocking suggestions / nits. (This is the
+                       preferred verdict when no Critical or Warning defects exist).
+   - REQUEST_CHANGES — any Critical or Warning issue that must be addressed before merge.
+   - COMMENT         — STRICTLY reserved for draft PRs (draft == true) or already-merged/
+                       closed PRs. Do NOT use COMMENT on standard open PRs; make a firm,
+                       decisive choice between APPROVE and REQUEST_CHANGES.
 7. POST the review. Write JSON to a file to avoid shell-quoting pain, then inject
    the HEAD SHA with jq:
    ```bash
