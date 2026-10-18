@@ -173,6 +173,17 @@ on:
         type: string
         default: hermes-triage-prompt.md
         description: Path (relative to the shared/workflow repo root) of the issue triage recipe.
+      hermes-use-runs:
+        required: false
+        type: boolean
+        default: false
+        description: >-
+          Dispatch through Hermes' Runs API (POST /v1/runs) and poll the run to completion,
+          failing the check if it ends failed/interrupted and writing the bot's reply to the
+          job summary. Default false keeps the legacy fire-and-forget POST to
+          /v1/chat/completions, which cannot tell a long healthy run from a silent failure.
+          The polling job holds its runner for the length of the review, so give the repo a
+          second self-hosted runner before opting in.
 
 jobs:
   hermes-review:
@@ -435,6 +446,7 @@ jobs:
           MODEL: ${{ inputs.hermes-model || vars.HERMES_MODEL || '' }}
           PROMPT_FILE: .hermes-shared/${{ steps.target.outputs.kind == 'pr' && inputs.prompt-path || inputs.issue-prompt-path }}
           MAX_TURNS: ${{ inputs.max-turns }}
+          USE_RUNS: ${{ inputs.hermes-use-runs }}
         run: |
           set -euo pipefail
           [ -f "$PROMPT_FILE" ] || { echo "::error::prompt not found: $PROMPT_FILE"; exit 1; }
@@ -449,6 +461,98 @@ jobs:
           HEADER+=$(printf '\nHonor a maximum of %s agent turns.\n\n' "$MAX_TURNS")
 
           MSG="$HEADER$(cat "$PROMPT_FILE")"
+
+          # ── Runs API path (opt-in via hermes-use-runs) ───────────────────────────────
+          # POST /v1/runs answers 202 + run_id as soon as the run is admitted, so unlike the
+          # legacy call below a connection failure or non-202 here is a real failure, and
+          # the run can be polled to a terminal status. The Idempotency-Key includes the
+          # workflow run id + attempt: a retry of THIS POST replays, but a re-run or a new
+          # mention on the same commit still dispatches a fresh review.
+          if [[ "$USE_RUNS" == "true" ]]; then
+            RESP=$(mktemp)
+            set +e
+            HTTP_CODE=$(curl -sS -m 30 -o "$RESP" -w '%{http_code}' \
+              -X POST "$API_URL/v1/runs" \
+              -H "Authorization: Bearer $API_KEY" \
+              -H "Content-Type: application/json" \
+              -H "Idempotency-Key: gha:$REPO#$TARGET_NUMBER:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" \
+              --data "$(jq -nc --arg model "$API_MODEL" --arg input "$MSG" '{model:$model,input:$input}')")
+            CURL_EXIT=$?
+            set -e
+            if [[ "$CURL_EXIT" != "0" ]]; then
+              echo "::error::Could not reach the Hermes API to dispatch the run (curl exit $CURL_EXIT) — review NOT dispatched."
+              exit 1
+            fi
+            if [[ "$HTTP_CODE" == "401" || "$HTTP_CODE" == "403" ]]; then
+              echo "::error::Hermes API rejected the key (HTTP $HTTP_CODE) — check HERMES_API_KEY secret."
+              exit 1
+            fi
+            if [[ "$HTTP_CODE" == "409" ]]; then
+              echo "::notice::Hermes reports a conflicting run for this request — treating it as already running."
+              exit 0
+            fi
+            if [[ "$HTTP_CODE" != "202" && "$HTTP_CODE" != "200" ]]; then
+              echo "::error::Hermes API returned HTTP $HTTP_CODE — review NOT dispatched: $(head -c 300 "$RESP" | tr '\n' ' ')"
+              exit 1
+            fi
+            RUN_ID=$(jq -r '.run_id // empty' "$RESP")
+            if [[ -z "$RUN_ID" ]]; then
+              echo "::error::Hermes accepted the request but returned no run_id — cannot track the review."
+              exit 1
+            fi
+            echo "::notice::dispatched Hermes run $RUN_ID; polling until it finishes."
+
+            POLL_INTERVAL="${HERMES_POLL_INTERVAL:-15}"
+            POLL_DEADLINE=$(( SECONDS + ${HERMES_POLL_SECONDS:-1500} ))
+            MISSES=0
+            STATUS=""
+            while (( SECONDS < POLL_DEADLINE )); do
+              set +e
+              CODE=$(curl -sS -m 10 -o "$RESP" -w '%{http_code}' \
+                "$API_URL/v1/runs/$RUN_ID" -H "Authorization: Bearer $API_KEY")
+              CURL_EXIT=$?
+              set -e
+              if [[ "$CURL_EXIT" != "0" || "$CODE" != "200" ]]; then
+                if [[ "$CODE" == "404" ]]; then
+                  echo "::error::Hermes no longer knows run $RUN_ID (expired or gateway state lost) — outcome unknown."
+                  exit 1
+                fi
+                MISSES=$(( MISSES + 1 ))
+                if (( MISSES >= 8 )); then
+                  echo "::error::Lost contact with the Hermes API while polling run $RUN_ID (last HTTP $CODE, curl exit $CURL_EXIT)."
+                  exit 1
+                fi
+                sleep "$POLL_INTERVAL"
+                continue
+              fi
+              MISSES=0
+              STATUS=$(jq -r '.status // "unknown"' "$RESP")
+              case "$STATUS" in
+                completed|failed|cancelled|interrupted) break ;;
+              esac
+              sleep "$POLL_INTERVAL"
+            done
+
+            {
+              echo "### Hermes run \`$RUN_ID\`: ${STATUS:-unknown}"
+              ERR=$(jq -r '.error // empty' "$RESP" 2>/dev/null | head -c 2000)
+              OUT=$(jq -r '.output // empty' "$RESP" 2>/dev/null | head -c 4000)
+              [[ -n "$ERR" ]] && printf '\n**Error:** %s\n' "$ERR"
+              [[ -n "$OUT" ]] && printf '\n%s\n' "$OUT"
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+            case "$STATUS" in
+              completed)
+                echo "::notice::Hermes run $RUN_ID completed."
+                exit 0 ;;
+              failed|cancelled|interrupted)
+                echo "::error::Hermes run $RUN_ID ended $STATUS: $(jq -r '.error // "no error reported"' "$RESP" | head -n 1 | head -c 300)"
+                exit 1 ;;
+              *)
+                echo "::warning::Hermes run $RUN_ID was still ${STATUS:-running} after the polling window; it continues on hermes-01 and posts to GitHub itself."
+                exit 0 ;;
+            esac
+          fi
 
           # Fire-and-forget: send the prompt, ignore the (async) response body.
           # -m 20s cap: we only need the server to ACCEPT the request, not to finish.
@@ -482,6 +586,9 @@ jobs:
           # is the expected outcome for any non-trivial review (see comment above this
           # step) -> treat as accepted-and-running.
 
+# With `hermes-use-runs: true` the "Run Hermes" step dispatches via POST /v1/runs and polls the
+# run to a terminal status instead (see that input and the README); the agent still posts to
+# GitHub itself either way.
 # NOTE: No "post review" step here — the agent on hermes-01 performs the POST using its
 # own App token, exactly as PR #18's original local design did. This preserves the
 # centralized-prompt, trigger-agnostic, reusable behaviour without installing Hermes on
