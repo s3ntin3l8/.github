@@ -120,6 +120,14 @@ on:
         required: false
         type: boolean
         default: true
+      detect-secrets-scope:
+        description: >
+          'all' scans every tracked file; 'changed' scans only the files that
+          differ from the base commit. 'changed' needs the full history in the
+          checkout, so it deepens the fetch.
+        required: false
+        type: string
+        default: 'all'
       test-pool:
         description: >
           Vitest worker pool (e.g. 'vmThreads'). Empty keeps Vitest's default.
@@ -183,6 +191,10 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
+          # 'changed' scope diffs against the base commit, so the history has
+          # to be there. '0' is a non-empty string, so the expression below
+          # stays truthy — the numeric 0 would not.
+          fetch-depth: ${{ inputs.detect-secrets-scope == 'changed' && '0' || '1' }}
       - name: Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
@@ -242,9 +254,42 @@ jobs:
         if: ${{ inputs.detect-secrets && hashFiles('.secrets.baseline') != '' }}
         continue-on-error: ${{ !inputs.strict-checks }}
         working-directory: .
+        env:
+          SCOPE: ${{ inputs.detect-secrets-scope }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: |
           pip install --quiet detect-secrets==1.5.0
-          git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+          if [ "$SCOPE" != "changed" ]; then
+            git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+            exit 0
+          fi
+          # 'changed' scope: only the files this push touched can have
+          # introduced a secret. The baseline is keyed by filename and line
+          # number, so a file that did not change keeps its baseline entry
+          # and the scan stays consistent.
+          base=""
+          for candidate in "$PR_BASE_SHA" "$MERGE_GROUP_BASE_SHA" "$PUSH_BEFORE_SHA"; do
+            if [ -n "$candidate" ] \
+              && [ "$candidate" != "0000000000000000000000000000000000000000" ] \
+              && git cat-file -e "${candidate}^{commit}" 2>/dev/null; then
+              base="$candidate"
+              break
+            fi
+          done
+          if [ -z "$base" ]; then
+            echo "::notice::No base commit available; scanning the whole tree."
+            git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+            exit 0
+          fi
+          echo "Scanning the files changed since $base"
+          git diff --name-only --diff-filter=ACMR "$base" HEAD -- > /tmp/changed-files.txt
+          if [ ! -s /tmp/changed-files.txt ]; then
+            echo "No changed files to scan."
+            exit 0
+          fi
+          xargs -a /tmp/changed-files.txt detect-secrets-hook --baseline .secrets.baseline
       # Detect scripts with `npm pkg get` (exact key lookup) instead of grepping
       # `npm run` output — the latter matched any script whose name OR body merely
       # contained "test"/"lint", and happily ran the `npm init` default
