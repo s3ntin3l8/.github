@@ -198,13 +198,28 @@ jobs:
           COVERAGE_SOURCE: ${{ inputs.coverage-source }}
           COVERAGE_FAIL_UNDER: ${{ inputs.coverage-fail-under }}
           TEST_PARALLEL: ${{ inputs.test-parallel }}
+          # The suite gets a throwaway HOME and XDG directories, so a test
+          # that reads the environment cannot reach the runner's real files.
+          # TEST_ISOLATION_ROOT carries the root so the repository's own
+          # conftest can give each parallel worker its own config root --
+          # without that, the workers share one database file.
+          TEST_ISOLATION_ROOT: ${{ runner.temp }}/test-isolation
         run: |
           if command -v pytest &> /dev/null; then
+            mkdir -p "$TEST_ISOLATION_ROOT"
             parallel=()
             if [ -n "$TEST_PARALLEL" ]; then
               parallel=(-n "$TEST_PARALLEL" --dist loadfile)
             fi
-            pytest "${parallel[@]}" --cov="$COVERAGE_SOURCE" --cov-report=xml --junitxml=junit.xml --cov-fail-under="$COVERAGE_FAIL_UNDER"
+            HOME="$TEST_ISOLATION_ROOT" \
+            USERPROFILE="$TEST_ISOLATION_ROOT" \
+            APPDATA="$TEST_ISOLATION_ROOT/AppData/Roaming" \
+            LOCALAPPDATA="$TEST_ISOLATION_ROOT/AppData/Local" \
+            XDG_CONFIG_HOME="$TEST_ISOLATION_ROOT/.config" \
+            XDG_DATA_HOME="$TEST_ISOLATION_ROOT/.local/share" \
+              pytest "${parallel[@]}" --basetemp "$TEST_ISOLATION_ROOT/pytest-tmp" \
+                --cov="$COVERAGE_SOURCE" --cov-report=xml --junitxml=junit.xml \
+                --cov-fail-under="$COVERAGE_FAIL_UNDER"
           fi
       - name: Upload coverage reports to Codecov
         continue-on-error: true  # reporting only; a Codecov outage must not fail CI
