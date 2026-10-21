@@ -93,7 +93,7 @@ Checks for vulnerable dependencies and license policy violations in PRs.
 ### [Hermes-Review](.github/workflows/hermes-review.yml)
 AI agent that acts on **`@s3ntin3l8-hermes` mentions** posted to a PR or issue by a human.
 The runner container does **not** run Hermes; it forwards the request to the **Hermes API
-server on `hermes-01`** (`192.168.2.6:8643`, the `review-bot` profile) over the LAN. The
+server on `hermes-01`** (`192.168.2.6:8642/p/review-bot`, the `review-bot` profile) over the LAN. The
 agent runs there — full tools, memory, skills — and **posts the review/comment back to
 GitHub itself** using a GitHub App token it mints via `app-token.sh`. This keeps runner
 containers lightweight (no hermes venv) while preserving the trigger-agnostic,
@@ -106,10 +106,10 @@ centralized-prompt, reusable design. See [`s3ntin3l8/.github` #18](https://githu
 - **Caller permissions (required):** `contents: write`, `pull-requests: write`, `issues: write`, `checks: write`.
 - **Secrets:** `HERMES_APP_ID`, `HERMES_APP_PRIVATE_KEY` (used by the runner to resolve the PR/issue for routing), and `HERMES_API_KEY` (bearer key for the hermes-01 API server) — pass via `secrets: inherit`.
 - **Variables:** `HERMES_MODEL` (optional model override).
-- **Inputs:** `hermes-api-url` (default `http://192.168.2.6:8643`), `hermes-api-model` (default `hermes-agent`), `mention-trigger` (default `hermes`), `hermes-model`, `max-turns` (default `30`), `prompt-path` (default `hermes-review-prompt.md`), `issue-prompt-path` (default `hermes-triage-prompt.md`).
+- **Inputs:** `hermes-api-url` (default `http://192.168.2.6:8642/p/review-bot`), `hermes-api-model` (default `hermes-agent`), `mention-trigger` (default `hermes`), `hermes-model`, `max-turns` (default `30`), `prompt-path` (default `hermes-review-prompt.md`), `issue-prompt-path` (default `hermes-triage-prompt.md`).
 - **Opt-in Runs API dispatch (`hermes-use-runs`, default `false`):** the default is a fire-and-forget `POST /v1/chat/completions` that cannot tell a long healthy run from a silent failure, so the check is green once the POST is accepted. With `hermes-use-runs: true` the workflow uses `POST /v1/runs`, polls `GET /v1/runs/{id}` until the run is terminal, **fails the check if it ends `failed`/`cancelled`/`interrupted`** (or the API is lost/rejects the key), and writes the bot's reply to the job summary. A run still going after ~25 minutes only warns (it keeps running on hermes-01). The polling job holds its self-hosted runner for the length of the review, so give the repo a second runner before opting in (`count: 2` in `ansible/host_vars/gh-runner-01.yml`). Requires Hermes with the Runs API (check `GET /v1/capabilities` for `run_submission`/`run_status`).
 - **Runner requirement:** a `self-hosted` runner with `gh`, `curl`, and `python3` on PATH (no hermes install needed).
-- **hermes-01 requirement:** the `review-bot` profile API server must be running and reachable from the runner — started with `hermes -p review-bot gateway`, with `API_SERVER_HOST` bound to the LAN interface (not `127.0.0.1`), `API_SERVER_PORT` set, and `API_SERVER_KEY` configured (that's `HERMES_API_KEY`).
+- **hermes-01 requirement:** the `review-bot` profile API must be running and reachable from the runner — served natively by the multiplexed gateway (`/p/review-bot` on port 8642) with `API_SERVER_KEY` configured (`HERMES_API_KEY`). Port 8643 is kept as a compatibility forwarder.
 - **Expects:** a GitHub App installed on the calling repo with `Contents:Write` (open PRs), `Pull requests:Read&write`, `Checks:Read&write`, `Issues:Write` (triage). Triggering is **Actions-driven** (the *calling* repo defines `on: issue_comment` only — see the example). Do **not** subscribe to `pull_request_review_comment` / `pull_request_review`: a submitted review fires those events and review bodies routinely contain the `@<slug>` string, which re-triggers this workflow with no human summon (the Claude→Hermes cascade on s3ntin3l8/.github#527). `issue_comment` alone covers both PR-conversation and issue mentions.
 
 > **`@<slug>` mention trigger:** comment `@s3ntin3l8-hermes` on a PR (or reply to a review
