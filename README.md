@@ -68,7 +68,9 @@ Native Android and iOS companion application CI with `gomobile` support. Runs JD
 Multi-arch builds (amd64/arm64), GHCR push, and Cosign signing.
 - **Caller permissions (required):** `contents: read`, `packages: write`, `id-token: write`.
 - **Secrets:** `REGISTRY_USERNAME`/`REGISTRY_TOKEN` (optional; falls back to `GITHUB_TOKEN`) — pass via `secrets: inherit`. `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` (optional) authenticate base-image pulls from Docker Hub; without them pulls are anonymous and may hit the rate limit (429). Use a read-only ("Public Repo Read-only") access token.
-- **Inputs:** `image-name` (required), `push-edge`, `push-release`, `release-tag`, `platforms`.
+- **Inputs:** `image-name` (required), `push-edge`, `push-release`, `release-tag`, `platforms`, `dockerfile`, `build-args`.
+- **Built commit:** the build always receives `COMMIT_SHA=<the commit it checked out>` (the tag's commit for a release build). Use that for a build stamp instead of `${{ github.sha }}`, which is the commit that triggered the *caller* and differs on a manual dispatch or a rebuild of an older tag. Declare `ARG COMMIT_SHA` where you consume it.
+- **Build-arg check:** each `build-args` key is checked against `dockerfile`. The build **fails** when the final stage references `$X` without its own `ARG X` (the value would be silently empty) and **warns** when `X` appears nowhere in the Dockerfile. An arg consumed only in a builder stage (baked into a bundle) is fine.
 
 ### [CodeQL](.github/workflows/codeql.yml)
 Advanced semantic security scanning. Code scanning is free on public repos; private repos need GitHub Advanced Security.
