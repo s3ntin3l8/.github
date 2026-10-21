@@ -194,13 +194,15 @@ jobs:
           # comment addresses the bot. A mention in the middle of a sentence ("Addressed the
           # review from @claude in abc123") only describes something to a human reader and must
           # not start a run. Quoted lines (> ...) and fenced code blocks are ignored, the match is
-          # case-insensitive (GitHub handles are), and the handle must end at a word boundary so
+          # case-insensitive (GitHub handles are), a leading list marker or **bold** is allowed
+          # ("- @claude review", "**@claude** review"), and the handle must end at a word boundary so
           # "@claudeX" and "@claude-foo" do not count. s3ntin3l8/.github#41, #42.
           addressed() { # $1 = text, $2 = handle without the leading @
             printf '%s\n' "$1" | tr -d '\r' | awk -v h="@$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" '
               /^[ \t]*(```|~~~)/ { fence = !fence; next }
               fence || /^[ \t]*>/ { next }
               { line = tolower($0); sub(/^[ \t]+/, "", line)
+                sub(/^([-*+]|[0-9]+[.)])[ \t]+/, "", line); sub(/^[*_]+/, "", line)
                 if (index(line, h) == 1) {
                   nxt = substr(line, length(h) + 1, 1)
                   if (nxt !~ /^[A-Za-z0-9_-]$/) found = 1
@@ -227,7 +229,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout repository
+      # The agent is allowed `git push` (see --allowedTools), so credentials must persist
+      # on this checkout; the ignore is inline so it cannot drift off a moved line.
+      - name: Checkout repository # zizmor: ignore[artipacked]
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 1

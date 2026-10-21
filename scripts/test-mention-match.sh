@@ -37,12 +37,18 @@ t yes claude "followed by a comma"                   "@claude, take another look
 t yes claude "alone on its line"                     $'@claude\n'
 t yes claude "case-insensitive"                      "@Claude review"
 t yes claude "CRLF line endings"                     $'fyi\r\n@claude review\r\n'
+t yes claude "list marker"                           "- @claude review"
+t yes claude "star list marker"                      "* @claude review"
+t yes claude "numbered list"                         "1. @claude review"
+t yes claude "bold"                                  "**@claude** review"
 t yes s3ntin3l8-hermes "hermes slug"                 "@s3ntin3l8-hermes Review"
 t yes s3ntin3l8-hermes "hermes bot suffix"           "@s3ntin3l8-hermes[bot] review"
 echo "== merely mentioned =="
 t no  claude "the pocket-portfolio-tracker#567 status report" \
   "Addressed the review from @claude in a008c4a8: fixed the null check, fixed the retry."
 t no  s3ntin3l8-hermes "the same report naming hermes"  "Addressed the review from @s3ntin3l8-hermes in abc123"
+t no  claude "list item that only mentions it"       "- thanks @claude for the review"
+t no  claude "no space after the list marker"        "-@claude review"
 t no  claude "mid-sentence"                          "ping @claude when it is done"
 t no  claude "quoted line"                           $'> @claude review\nthanks'
 t no  claude "fenced code block"                     $'```\n@claude review\n```'
