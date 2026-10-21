@@ -72,12 +72,57 @@ jobs:
         run: go vet ./...
       - name: Build
         run: go build ./...
+      - name: Install the Go test tooling
+        # Both tools are installed from the Go module proxy, and each one's
+        # own go.mod declares the minimum Go it needs. `GOTOOLCHAIN=local`
+        # (set by actions/setup-go) means the toolchain cannot be fetched to
+        # satisfy that, so `@latest` breaks the build for every repository
+        # whose Go is older than the newest release's requirement -- which is
+        # what happened with golang.org/x/vuln v1.9.0 (Go 1.26) against a
+        # Go 1.25 runner. Pick the newest release the runner's Go actually
+        # satisfies instead, so a new upstream release cannot turn every
+        # repository red at once.
+        shell: bash
+        run: |
+          version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$2" ]; }
+          go_minor="$(go env GOVERSION | sed 's/^go//' | cut -d. -f1,2)"
+
+          pick() {
+            # $1: "go-minor:version" entries, newest requirement first
+            local entry need ver
+            for entry in $1; do
+              need="${entry%%:*}"
+              ver="${entry##*:}"
+              if version_ge "$go_minor" "$need"; then
+                echo "$ver"
+                return 0
+              fi
+            done
+            echo ""
+          }
+
+          gotestsum_version="$(pick '1.24:v1.13.0 1.23:v1.12.3 1.21:v1.12.2 1.13:v1.12.0')"
+          govulncheck_version="$(pick '1.26:v1.9.0 1.25:v1.7.0 1.22:v1.1.4 1.21:v1.1.3 1.18:v1.1.2')"
+
+          if [ -n "$gotestsum_version" ]; then
+            echo "Installing gotestsum $gotestsum_version for $(go env GOVERSION)"
+            go install "gotest.tools/gotestsum@${gotestsum_version}"
+          else
+            echo "::error::No gotestsum release supports Go $go_minor."
+            exit 1
+          fi
+          if [ -n "$govulncheck_version" ]; then
+            echo "Installing govulncheck $govulncheck_version for $(go env GOVERSION)"
+            go install "golang.org/x/vuln/cmd/govulncheck@${govulncheck_version}"
+          else
+            echo "::error::No govulncheck release supports Go $go_minor."
+            exit 1
+          fi
       - name: Test with coverage
         # gotestsum runs `go test` and additionally writes a JUnit report for
         # Codecov Test Analytics. -coverpkg=./... forces per-package coverage so
         # the report reflects the full module, not just packages with tests.
         run: |
-          go install gotest.tools/gotestsum@latest
           "$(go env GOPATH)/bin/gotestsum" --junitfile junit.xml --format pkgname -- \
             -race -coverprofile=coverage.txt -covermode=atomic -coverpkg=./... ./...
       - name: Enforce coverage threshold
@@ -124,7 +169,6 @@ jobs:
         env:
           GOVULNCHECK_IGNORE: ${{ inputs.govulncheck-ignore }}
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
           "$(go env GOPATH)/bin/govulncheck" -format json ./... > govulncheck.json
 
           mapfile -t ignore < <(tr ',' '\n' <<<"$GOVULNCHECK_IGNORE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' || true)
