@@ -128,6 +128,16 @@ on:
           reachable from the runner over the LAN; points to the review-bot profile prefix
           on the multiplexed gateway (port 8642). Port 8643 is kept as a compatibility
           proxy on hermes-01.
+      mention-match:
+        required: false
+        type: string
+        default: line-start
+        description: >-
+          How the "@<mention-trigger>" must appear in an on-demand comment. "line-start"
+          (default) requires a line that STARTS with it, so a status report that merely
+          mentions the bot ("Addressed the review from @<slug> in abc123") does not start a
+          run; quoted lines and code blocks are ignored. "anywhere" restores the old
+          substring match.
       hermes-api-model:
         required: false
         type: string
@@ -336,6 +346,7 @@ jobs:
         id: check-mention
         env:
           MENTION: ${{ inputs.mention-trigger }}
+          MENTION_MATCH: ${{ inputs.mention-match }}
           MODE: ${{ inputs.mode }}
           BODY: ${{ github.event.comment.body || github.event.review.body || github.event.issue.body }}
           PREFLIGHT_SKIP: ${{ steps.preflight.outputs.skip }}
@@ -351,8 +362,33 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [[ -z "${BODY:-}" ]] || ! echo "$BODY" | grep -q "@$MENTION"; then
-            echo "::notice::No '@$MENTION' mention found — skipping."
+          # --- addressed(): keep byte-identical in hermes-review.yml and claude-code.yml
+          # (scripts/test-mention-match.sh fails if they drift) ---
+          # True when some line of the text STARTS with the handle (after whitespace), i.e. the
+          # comment addresses the bot. A mention in the middle of a sentence ("Addressed the
+          # review from @claude in abc123") only describes something to a human reader and must
+          # not start a run. Quoted lines (> ...) and fenced code blocks are ignored, the match is
+          # case-insensitive (GitHub handles are), and the handle must end at a word boundary so
+          # "@claudeX" and "@claude-foo" do not count. s3ntin3l8/.github#41, #42.
+          addressed() { # $1 = text, $2 = handle without the leading @
+            printf '%s\n' "$1" | tr -d '\r' | awk -v h="@$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" '
+              /^[ \t]*(```|~~~)/ { fence = !fence; next }
+              fence || /^[ \t]*>/ { next }
+              { line = tolower($0); sub(/^[ \t]+/, "", line)
+                if (index(line, h) == 1) {
+                  nxt = substr(line, length(h) + 1, 1)
+                  if (nxt !~ /^[A-Za-z0-9_-]$/) found = 1
+                } }
+              END { exit !found }'
+          }
+          # --- end addressed() ---
+          if [[ "${MENTION_MATCH:-line-start}" == "anywhere" ]]; then
+            matched() { grep -qiF "@$MENTION" <<< "$1"; }
+          else
+            matched() { addressed "$1" "$MENTION"; }
+          fi
+          if [[ -z "${BODY:-}" ]] || ! matched "$BODY"; then
+            echo "::notice::No '@$MENTION' addressed to the bot (a line starting with it) — skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0   # not a failure: leave the run green
           fi
