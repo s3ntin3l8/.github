@@ -191,6 +191,17 @@ on:
         type: string
         default: hermes-triage-prompt.md
         description: Path (relative to the shared/workflow repo root) of the issue triage recipe.
+      hermes-react:
+        required: false
+        type: boolean
+        default: true
+        description: >-
+          React with 👀 to the comment that asked for the review, once a review has
+          actually been dispatched (a NEW Hermes run was accepted: not a skip, not a replay of
+          an existing run, not a refusal or a failure). Needs `hermes-use-runs: true`, the only
+          path that can tell a dispatch from a silent no-op, and an App with Issues and Pull
+          requests write. Best-effort: a failure to react never fails the review. Set false to
+          turn it off.
       hermes-use-runs:
         required: false
         type: boolean
@@ -699,6 +710,24 @@ jobs:
             exit 1
           fi
 
+      # The 👀 reaction (see `hermes-react`). Its own short-lived token, minted only for this
+      # purpose: the runner-side token above stays read-mostly, and an App that lacks Issues
+      # write cannot break a review (continue-on-error: no token, no reaction).
+      - name: Create reaction token (best-effort)
+        id: react-token
+        if: >-
+          steps.check-mention.outputs.skip != 'true' && steps.guard.outputs.skip != 'true' &&
+          steps.scope.outputs.skip != 'true' && steps.inflight.outputs.skip != 'true' &&
+          inputs.hermes-react && inputs.hermes-use-runs &&
+          contains(fromJSON('["issue_comment", "pull_request_review_comment", "issues"]'), github.event_name)
+        continue-on-error: true
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.HERMES_APP_ID }}
+          private-key: ${{ secrets.HERMES_APP_PRIVATE_KEY }}
+          permission-issues: write
+          permission-pull-requests: write
+
       # Relay the request to the Hermes API server on hermes-01. The agent runs there
       # with full tools/memory/skills, re-mints its own GitHub App token, and posts the
       # review/comment BACK TO GITHUB ITSELF. We only forward: which target, the prompt,
@@ -738,6 +767,10 @@ jobs:
           LEDGER: ${{ inputs.hermes-review-ledger }}
           LEDGER_NAME: ${{ inputs.hermes-review-ledger-name }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REACTION_TOKEN: ${{ steps.react-token.outputs.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           set -euo pipefail
           [ -f "$PROMPT_FILE" ] || { echo "::error::prompt not found: $PROMPT_FILE"; exit 1; }
@@ -958,6 +991,22 @@ jobs:
             REPLAYED=$(jq -r '.replayed // false' "$RESP")
             if [[ "$REPLAYED" == "true" ]]; then
               echo "::notice::Hermes replayed the existing run $RUN_ID for this range (idempotency key $IDEMPOTENCY_KEY) — no second review was dispatched."
+            elif [[ -n "${REACTION_TOKEN:-}" ]]; then
+              # A NEW run was accepted: this is the moment the request is really being worked
+              # on, so acknowledge the comment with 👀 now, not when the review ends. Only
+              # here: never on a skip, a refusal, a failure or a replay (this comment started
+              # nothing). Best-effort and non-fatal.
+              case "$EVENT_NAME" in
+                issue_comment) REACT_TO="repos/$REPO/issues/comments/$COMMENT_ID/reactions" ;;
+                pull_request_review_comment) REACT_TO="repos/$REPO/pulls/comments/$COMMENT_ID/reactions" ;;
+                issues) REACT_TO="repos/$REPO/issues/$ISSUE_NUMBER/reactions" ;;
+                *) REACT_TO="" ;;
+              esac
+              if [[ -n "$REACT_TO" ]]; then
+                GH_TOKEN="$REACTION_TOKEN" gh api --method POST "$REACT_TO" -f content=eyes --silent \
+                  && echo "::notice::reacted 👀 to the request." \
+                  || echo "::warning::could not add the 👀 reaction (non-fatal) — the review itself was dispatched."
+              fi
             fi
 
             # The in-flight marker: a check run on the reviewed head whose external_id

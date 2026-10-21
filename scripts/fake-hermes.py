@@ -117,7 +117,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(429, {"error": {"message": "Too many concurrent runs (max 10)",
                                            "code": "rate_limit_exceeded"}})
                 return
-            self._send(code, {"run_id": "run_new123", "status": "started", "replayed": False})
+            self._send(code, {"run_id": "run_new123", "status": "started", "replayed": STATE.get("replayed", False)})
             return
         self._send(404, {"error": "nope"})
 
