@@ -55,6 +55,11 @@ args=("$@")
 joined="${args[*]}"
 log() { echo "$*" >> "$GH_LOG"; }
 case "$joined" in
+  *"/reactions"*)
+    # The 👀 reaction. Records WHICH token made the call and where it went.
+    log "reaction to=${args[*]} token=${GH_TOKEN:-}"
+    [[ "${FAKE_REACTION_FAIL:-}" == "1" ]] && exit 1
+    exit 0 ;;
   *"/pulls/"*".head.sha"*)  log "head ${FAKE_HEAD:-head111}"; echo "${FAKE_HEAD:-head111}"; exit 0 ;;
   *"/pulls/"*"reviews"*)
     # A real review list, run through the workflow's own --jq filter, so the
@@ -391,6 +396,55 @@ start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
 stop_fake
 unset RUNNER_TEMP
 export BASE_SHA=""
+echo "== the 👀 reaction: only when a review was really dispatched =="
+export EVENT_NAME="issue_comment" COMMENT_ID="777" ISSUE_NUMBER="42" REACTION_TOKEN="react-token"
+reacted() { grep -c "^reaction" "$GH_LOG"; }
+
+: > "$GH_LOG"; export FAKE_MARKER_RUN="run_dead"
+start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.eyes" 2>&1
+grep -q "^reaction to=.*repos/acme/widgets/issues/comments/777/reactions.*content=eyes.* token=react-token" "$GH_LOG" \
+  && check "a freshly dispatched review reacts 👀 to the comment, with the reaction token" yes \
+  || { check "a freshly dispatched review reacts 👀 to the comment, with the reaction token" no; sed 's/^/        /' "$GH_LOG" | tail -4; }
+stop_fake
+
+: > "$GH_LOG"
+start_fake '{"run_status":"completed","replayed":true,"request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.eyes" 2>&1
+[[ $(reacted) -eq 0 ]] && check "a replay of an existing run does not react" yes || check "a replay of an existing run does not react" no
+stop_fake
+
+: > "$GH_LOG"; export FAKE_MARKER_RUN="run_live"
+start_fake '{"run_statuses":{"run_live":"running"},"dispatch_codes":[409,202],"request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.eyes" 2>&1
+[[ $(reacted) -eq 0 ]] && check "an already-running review (nothing dispatched) does not react" yes || check "an already-running review (nothing dispatched) does not react" no
+stop_fake
+
+: > "$GH_LOG"; export FAKE_MARKER_RUN="run_dead"
+start_fake '{"dispatch_code":429,"request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.eyes" 2>&1
+[[ $(reacted) -eq 0 ]] && check "a refused dispatch (429) does not react" yes || check "a refused dispatch (429) does not react" no
+stop_fake
+
+: > "$GH_LOG"
+start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,409,409],"conflict_code":"admission_conflict","request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.eyes" 2>&1
+[[ $(reacted) -eq 0 ]] && check "every attempt refused (409) does not react" yes || check "every attempt refused (409) does not react" no
+stop_fake
+
+: > "$GH_LOG"; unset REACTION_TOKEN
+start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.eyes" 2>&1
+[[ $(reacted) -eq 0 ]] && check "without a reaction token (opted out / not minted) nothing is posted" yes || check "without a reaction token (opted out / not minted) nothing is posted" no
+stop_fake
+
+: > "$GH_LOG"; export REACTION_TOKEN="react-token" FAKE_REACTION_FAIL=1
+start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.eyes" 2>&1; rc=$?
+[[ $rc -eq 0 ]] && check "a failing reaction never fails the review" yes || { check "a failing reaction never fails the review" no; sed 's/^/        /' "$TMP/log.eyes" | tail -4; }
+grep -q "could not add the" "$TMP/log.eyes" && check "a failing reaction is reported as a warning" yes || check "a failing reaction is reported as a warning" no
+stop_fake
+unset FAKE_REACTION_FAIL REACTION_TOKEN EVENT_NAME COMMENT_ID ISSUE_NUMBER
 
 echo
 echo "passed: $PASS   failed: $FAIL"
