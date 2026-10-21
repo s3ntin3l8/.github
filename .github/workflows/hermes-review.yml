@@ -434,7 +434,6 @@ jobs:
           REPO: ${{ github.repository }}
           KIND: ${{ steps.target.outputs.kind }}
           NUMBER: ${{ steps.target.outputs.number }}
-          BOT_LOGIN: ${{ inputs.mention-trigger }}[bot]
           SCOPE_MODE: ${{ inputs.hermes-review-scope }}
         run: |
           set -euo pipefail
@@ -451,15 +450,18 @@ jobs:
             echo "::error::Could not read the head commit of $REPO#$NUMBER — review NOT dispatched."
             exit 1
           fi
-          # jq's `env` object reads BOT_LOGIN from this step's own env: block, so the
-          # bot login needs no --arg interpolation (the same shape the re-trigger guard
-          # above uses; `gh api --jq` takes exactly one argument and rejects jq's own
-          # --arg).
+          # The commit the previous round covered: the most recent review that
+          # actually LANDED, by any bot. "Landed" is the state set the relay
+          # uses too (APPROVED / CHANGES_REQUESTED / COMMENTED) — a PENDING
+          # (draft) review never landed, and a DISMISSED one was retracted.
+          # The rule must match the relay's exactly: both put it in the
+          # idempotency key, so a difference here means the two entry points
+          # stop deduplicating against each other.
           LAST_REVIEWED=$(gh api "repos/$REPO/pulls/$NUMBER/reviews" \
-            --jq '[.[] | select(.user.login == env.BOT_LOGIN and .state != "DISMISSED") | .commit_id] | last // empty')
+            --jq '[.[] | select(.user.type == "Bot" and (.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED")) | .commit_id] | last // empty')
           echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           if [[ -n "$LAST_REVIEWED" && "$LAST_REVIEWED" == "$HEAD_SHA" ]]; then
-            echo "::notice::$BOT_LOGIN already reviewed $REPO#$NUMBER at $HEAD_SHA — the head has not moved since; skipping."
+            echo "::notice::a review of $REPO#$NUMBER already landed at $HEAD_SHA — the head has not moved since, so there is nothing new to review; skipping. Push a new commit to ask for another round (or dismiss that review first)."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi

@@ -31,16 +31,36 @@ trap cleanup EXIT
 # repository's name, `gh api repos/<owner>/<repo>/...` takes the pair.
 cat > "$TMP/gh" <<'GH'
 #!/usr/bin/env bash
-args="$*"
+# The arguments are walked as an array, not as a flattened string: the --jq
+# filter contains spaces and quotes, and word-splitting it would hand jq a
+# truncated program.
+args=("$@")
+joined="${args[*]}"
 log() { echo "$*" >> "$GH_LOG"; }
-case "$args" in
+case "$joined" in
   *"/pulls/"*".head.sha"*)  log "head ${FAKE_HEAD:-head111}"; echo "${FAKE_HEAD:-head111}"; exit 0 ;;
-  *"/pulls/"*"reviews"*)    log "reviews ${FAKE_LAST_REVIEWED:-}"; echo "${FAKE_LAST_REVIEWED:-}"; exit 0 ;;
+  *"/pulls/"*"reviews"*)
+    # A real review list, run through the workflow's own --jq filter, so the
+    # filter is exercised here and not only in a consumer run.
+    log "reviews"
+    reviews='[{"user":{"type":"Bot","login":"hermes[bot]"},"state":"APPROVED","commit_id":"'"${FAKE_LAST_REVIEWED:-}"'"}]'
+    filter=""
+    prev=""
+    for a in "${args[@]}"; do
+      if [[ "$prev" == "--jq" ]]; then filter="$a"; fi
+      prev="$a"
+    done
+    if [[ -n "$filter" ]]; then
+      printf '%s' "$reviews" | jq -r "$filter" 2>/dev/null || echo ""
+    else
+      printf '%s' "$reviews"
+    fi
+    exit 0 ;;
   *"graphql"*)
     # `gh api graphql` takes the repository's NAME, not "owner/repo".
     repo=""
     prev=""
-    for a in $args; do
+    for a in "${args[@]}"; do
       if [[ "$prev" == "-F" && "$a" == repo=* ]]; then repo=${a#repo=}; fi
       prev=$a
     done
