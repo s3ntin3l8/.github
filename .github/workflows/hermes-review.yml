@@ -765,9 +765,15 @@ jobs:
                   set -e
                   if [[ -n "$EXISTING_STATUS" && "$EXISTING_STATUS" != "completed" && "$EXISTING_STATUS" != "failed" && "$EXISTING_STATUS" != "cancelled" && "$EXISTING_STATUS" != "interrupted" ]]; then
                     echo "::notice::a review of this range is still running (Hermes run $MARKER_RUN, $EXISTING_STATUS) — it will post to the PR itself."
+                  elif [[ -z "$EXISTING_STATUS" ]]; then
+                    # The status lookup failed (API unreachable, run unknown, bad
+                    # JSON): we do NOT know whether the run ended, so don't claim it.
+                    echo "::warning::Hermes holds run $MARKER_RUN for this range, but its status could not be read (the lookup returned nothing) — it may still be running. Check the run on hermes-01 before asking again."
                   else
                     echo "::warning::the run Hermes holds for this range has ended ($EXISTING_STATUS, run $MARKER_RUN) and its request no longer matches the current one (the shared prompt changed) — ask again to start a fresh attempt."
                   fi
+                else
+                  echo "::warning::Hermes holds a run for this range but no ledger marker names it, so whether it is still running is unknown — this green check does not mean a review is in progress."
                 fi
               fi
               exit 0
