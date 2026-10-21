@@ -97,15 +97,23 @@ name: Hermes PR Review (reusable)
 
 on:
   workflow_call:
+    # NOT `required: true`, deliberately. A dependabot-authored `pull_request` run is
+    # handed only Dependabot secrets, so with `secrets: inherit` these arrive unset, and
+    # GitHub rejects a call that omits a required secret before ANY step runs
+    # ("Secret HERMES_APP_ID is required, but not provided while calling" -- a red check
+    # on every dependency PR, which is why dependabot was excluded; seen in
+    # runway-ai-usage-tracker runs before its #250). Optional here, enforced by the
+    # "Preflight" step instead, which can tell a dependabot run (skip with a notice)
+    # from a misconfigured caller (fail with a clear error).
     secrets:
       HERMES_APP_ID:
-        required: true
+        required: false
         description: GitHub App numeric ID (from the App's settings page).
       HERMES_APP_PRIVATE_KEY:
-        required: true
+        required: false
         description: GitHub App PEM private key.
       HERMES_API_KEY:
-        required: true
+        required: false
         description: >-
           Bearer key for the hermes-01 API server (API_SERVER_KEY). Distinct from the
           App PEM. The agent uses this to authenticate the run; it mints the GitHub
@@ -238,6 +246,15 @@ jobs:
     #     actor-based check silently stops excluding bot-authored PRs on that
     #     trigger. Author-based exclusion holds on both `opened` and
     #     `ready_for_review`.
+    #   - bot-author exclusion keeps only the Hermes bot itself (self-review) and
+    #     github-actions[bot] (release-please: a changelog PR has nothing for a code
+    #     review to say). dependabot[bot] is deliberately NOT excluded: a bump can
+    #     change a runtime tool version without saying so (runway-ai-usage-tracker#627
+    #     moved sigstore/cosign-installer v3 -> v4, silently taking the installed
+    #     cosign from v2.2.4 to a v3.0.6 with a high-severity advisory), and a
+    #     reviewer is exactly what catches that. See s3ntin3l8/.github#85. Dependabot
+    #     runs only see Dependabot secrets, so the "Preflight" step below skips
+    #     (green, with a notice) when they are not mirrored instead of failing.
     #   - mullion/task-* branch exclusion: Task Master's own reviewer bot already
     #     reviews its own task PRs (any Mullion-managed repo, not just
     #     mullion-session-manager's own codebase — Task Master operates across
@@ -258,7 +275,6 @@ jobs:
           github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository &&
           github.event.pull_request.user.login != 's3ntin3l8-hermes[bot]' &&
-          github.event.pull_request.user.login != 'dependabot[bot]' &&
           github.event.pull_request.user.login != 'github-actions[bot]' &&
           !startsWith(github.event.pull_request.head.ref, 'mullion/task-')
         )
@@ -266,8 +282,34 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 30
     steps:
+      # A `pull_request` run authored by dependabot[bot] gets Dependabot secrets, NOT
+      # Actions secrets. A repo that has not mirrored HERMES_* into Settings -> Secrets
+      # -> Dependabot would otherwise fail the App-token step and put a red check on
+      # every dependency PR. Skip quietly instead; the notice says how to enable it.
+      - name: Preflight (secrets visible to this run?)
+        id: preflight
+        env:
+          HAS_APP_ID: ${{ secrets.HERMES_APP_ID != '' }}
+          HAS_APP_KEY: ${{ secrets.HERMES_APP_PRIVATE_KEY != '' }}
+          HAS_API_KEY: ${{ secrets.HERMES_API_KEY != '' }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          if [[ "$HAS_APP_ID" == "true" && "$HAS_APP_KEY" == "true" && "$HAS_API_KEY" == "true" ]]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$PR_AUTHOR" == "dependabot[bot]" ]]; then
+            echo "::notice::HERMES_APP_ID / HERMES_APP_PRIVATE_KEY / HERMES_API_KEY are not visible to this dependabot-authored run - skipping the review. Add them under Settings -> Secrets and variables -> Dependabot to enable auto-review of dependency PRs."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            # Anyone else with missing secrets is a real misconfiguration (they used to
+            # be `required: true`, which failed the call): fail loudly, naming them.
+            echo "::error::HERMES_APP_ID / HERMES_APP_PRIVATE_KEY / HERMES_API_KEY must all be set (present: app-id=$HAS_APP_ID, private-key=$HAS_APP_KEY, api-key=$HAS_API_KEY). Pass them with 'secrets: inherit'."
+            exit 1
+          fi
+
       - name: Create GitHub App token (runner-side, for trigger resolution)
         id: app-token
+        if: steps.preflight.outputs.skip != 'true'
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
           app-id: ${{ secrets.HERMES_APP_ID }}
@@ -296,8 +338,14 @@ jobs:
           MENTION: ${{ inputs.mention-trigger }}
           MODE: ${{ inputs.mode }}
           BODY: ${{ github.event.comment.body || github.event.review.body || github.event.issue.body }}
+          PREFLIGHT_SKIP: ${{ steps.preflight.outputs.skip }}
         run: |
           set -euo pipefail
+          # Preflight found no usable secrets (dependabot run): gate every later step.
+          if [[ "$PREFLIGHT_SKIP" == "true" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # Auto mode: never skip on mention — the caller's trigger is the gate.
           if [[ "${MODE:-on-demand}" != "on-demand" ]]; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
