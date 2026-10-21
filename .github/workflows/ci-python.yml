@@ -26,6 +26,39 @@ on:
         required: false
         type: boolean
         default: false
+      test-parallel:
+        description: >-
+          Run pytest in this many parallel workers (e.g. '4'). Empty keeps the
+          suite serial. Uses `--dist loadfile`, which keeps every test module
+          inside one worker so module-scoped fixtures and import-time setup
+          stay together. The caller must have pytest-xdist installed.
+        required: false
+        type: string
+        default: ''
+      detect-secrets:
+        description: >-
+          Scan for secrets. Set to false when the caller runs its own secrets
+          gate (e.g. a frontend job that would otherwise repeat a scan the
+          Python job already did).
+        required: false
+        type: boolean
+        default: true
+      detect-secrets-scope:
+        description: >-
+          'all' scans every tracked file; 'changed' scans only the files that
+          differ from the base commit. 'changed' needs the full history in the
+          checkout, so it deepens the fetch.
+        required: false
+        type: string
+        default: 'all'
+      cache-dependency-path:
+        description: >-
+          Path to the requirements file that keys the pip cache. Without it
+          setup-python falls back to `**/requirements.txt`, so a change to a
+          requirements-dev.txt never busts the cache.
+        required: false
+        type: string
+        default: ''
     secrets:
       CODECOV_TOKEN:
         required: false
@@ -63,11 +96,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # 'changed' scope diffs against the base commit, so the history has
+          # to be there. '0' is a non-empty string, so the expression below
+          # stays truthy — the numeric 0 would not.
+          fetch-depth: ${{ inputs.detect-secrets-scope == 'changed' && '0' || '1' }}
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ inputs.python-version }}
           cache: 'pip'
+          cache-dependency-path: ${{ inputs.cache-dependency-path }}
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -100,10 +138,45 @@ jobs:
           if command -v mypy &> /dev/null; then mypy .; fi
       - name: Detect secrets
         # Always a hard gate: a committed secret should fail the build regardless
-        # of strict-checks.
+        # of strict-checks. Callers that run their own gate set
+        # `detect-secrets: false` so the same tree is not scanned twice.
+        if: ${{ inputs.detect-secrets && hashFiles('.secrets.baseline') != '' }}
+        env:
+          SCOPE: ${{ inputs.detect-secrets-scope }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: |
           if command -v detect-secrets-hook &> /dev/null && [ -f .secrets.baseline ]; then
-            git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+            if [ "$SCOPE" != "changed" ]; then
+              git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+              exit 0
+            fi
+            # 'changed' scope: only the files this push touched can have
+            # introduced a secret. The baseline is keyed by filename and line
+            # number, so a file that did not change keeps its baseline entry
+            # and the scan stays consistent.
+            base=""
+            for candidate in "$PR_BASE_SHA" "$MERGE_GROUP_BASE_SHA" "$PUSH_BEFORE_SHA"; do
+              if [ -n "$candidate" ] \
+                && [ "$candidate" != "0000000000000000000000000000000000000000" ] \
+                && git cat-file -e "${candidate}^{commit}" 2>/dev/null; then
+                base="$candidate"
+                break
+              fi
+            done
+            if [ -z "$base" ]; then
+              echo "::notice::No base commit available; scanning the whole tree."
+              git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+              exit 0
+            fi
+            echo "Scanning the files changed since $base"
+            git diff --name-only --diff-filter=ACMR "$base" HEAD -- > /tmp/changed-files.txt
+            if [ ! -s /tmp/changed-files.txt ]; then
+              echo "No changed files to scan."
+              exit 0
+            fi
+            xargs -a /tmp/changed-files.txt detect-secrets-hook --baseline .secrets.baseline
           fi
       - name: Dependency security scan
         # Advisory by default (continue-on-error): pinned/held major versions
@@ -124,9 +197,14 @@ jobs:
         env:
           COVERAGE_SOURCE: ${{ inputs.coverage-source }}
           COVERAGE_FAIL_UNDER: ${{ inputs.coverage-fail-under }}
+          TEST_PARALLEL: ${{ inputs.test-parallel }}
         run: |
           if command -v pytest &> /dev/null; then
-            pytest --cov="$COVERAGE_SOURCE" --cov-report=xml --junitxml=junit.xml --cov-fail-under="$COVERAGE_FAIL_UNDER"
+            parallel=()
+            if [ -n "$TEST_PARALLEL" ]; then
+              parallel=(-n "$TEST_PARALLEL" --dist loadfile)
+            fi
+            pytest "${parallel[@]}" --cov="$COVERAGE_SOURCE" --cov-report=xml --junitxml=junit.xml --cov-fail-under="$COVERAGE_FAIL_UNDER"
           fi
       - name: Upload coverage reports to Codecov
         continue-on-error: true  # reporting only; a Codecov outage must not fail CI
