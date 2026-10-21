@@ -11,5 +11,6 @@ rules:
   artipacked:
     ignore:
       # The agent is allowed `git push` (see --allowedTools), so credentials
-      # must persist on this checkout.
-      - claude-code.yml:163
+      # must persist on this checkout. Pinned to the step's LINE: if lines are added
+      # above it in claude-code.yml, move this number, or the finding comes back.
+      - claude-code.yml:230
