@@ -26,9 +26,21 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 STATE = {
     "run_status": "running",
+    # Per-run statuses, e.g. {"run_dead": "failed"}; run_status is the
+    # fallback for any run id not named here.
+    "run_statuses": {},
     "dispatch_code": 202,
+    # A sequence of dispatch codes, e.g. [409, 202]: the first dispatch
+    # answers 409, the second 202. dispatch_code is the fallback.
+    "dispatch_codes": [],
+    # The error code a 409 carries: "idempotency_key_conflict" (the key holds a
+    # different body) or "admission_conflict" (the session refused the turn).
+    "conflict_code": "idempotency_key_conflict",
+    # What POST /v1/chat/completions (the legacy path) answers.
+    "legacy_code": 200,
     "request_log": "",
 }
+DISPATCHES = []
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -57,7 +69,8 @@ class Handler(BaseHTTPRequestHandler):
             if run_id == "unknown-run":
                 self._send(404, {"error": "not found"})
                 return
-            self._send(200, {"run_id": run_id, "status": STATE["run_status"]})
+            status = STATE.get("run_statuses", {}).get(run_id, STATE["run_status"])
+            self._send(200, {"run_id": run_id, "status": status})
             return
         self._send(404, {"error": "nope"})
 
@@ -69,6 +82,22 @@ class Handler(BaseHTTPRequestHandler):
             self._record({"method": "POST", "path": self.path, "run_id": run_id})
             self._send(200, {"run_id": run_id, "status": "stopping"})
             return
+        if self.path == "/v1/chat/completions":
+            # The legacy path. It answers the refusal the caller has to notice:
+            # a 409 means Hermes' session authority refused the turn.
+            self._record({
+                "method": "POST",
+                "path": self.path,
+                "session_id": self.headers.get("X-Hermes-Session-Id"),
+                "body": json.loads(raw) if raw else None,
+            })
+            code = STATE["legacy_code"]
+            if code == 409:
+                self._send(409, {"error": {"message": "admission_conflict",
+                                           "code": STATE["conflict_code"]}})
+                return
+            self._send(code, {"id": "chatcmpl-probe", "object": "chat.completion"})
+            return
         if self.path == "/v1/runs":
             self._record({
                 "method": "POST",
@@ -76,7 +105,14 @@ class Handler(BaseHTTPRequestHandler):
                 "idempotency_key": self.headers.get("Idempotency-Key"),
                 "body": json.loads(raw) if raw else None,
             })
-            code = STATE["dispatch_code"]
+            codes = STATE.get("dispatch_codes") or []
+            index = len(DISPATCHES)
+            code = codes[index] if index < len(codes) else STATE["dispatch_code"]
+            DISPATCHES.append(index)
+            if code == 409:
+                self._send(409, {"error": {"message": "Idempotency-Key was already used with a different request payload",
+                                           "code": STATE["conflict_code"]}})
+                return
             if code == 429:
                 self._send(429, {"error": {"message": "Too many concurrent runs (max 10)",
                                            "code": "rate_limit_exceeded"}})
