@@ -654,6 +654,11 @@ jobs:
             # A session id becomes a file name on Hermes' side, so fold the owner and
             # repo to characters that are safe there ([A-Za-z0-9_-]); a "/" or a ".."
             # in it would be rejected as an unsafe session id.
+            #
+            # This must stay identical to Mullion's own relay (reviewSessionId in
+            # s3ntin3l8/mullion-session-manager's src/services/hermes-review.ts), or
+            # a review asked for through `mullion review` and one asked for with an
+            # @mention would land in two different sessions and could both run.
             OWNER_SLUG=$(printf '%s' "$OWNER" | tr -c 'A-Za-z0-9_-' '-')
             REPO_SLUG=$(printf '%s' "$REPO" | tr -c 'A-Za-z0-9_-' '-')
             SESSION_ID="hermes-review-${OWNER_SLUG}-${REPO_SLUG}-$TARGET_NUMBER"
