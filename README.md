@@ -81,6 +81,7 @@ Advanced semantic security scanning. Code scanning is free on public repos; priv
 Automated versioning and changelogs.
 - **Caller permissions (required):** `contents: write`, `pull-requests: write`.
 - **Expects:** `release-please-config.json` and `.release-please-manifest.json` in the repo root.
+- **Optional secrets `RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY`** (opt-in, pass via `secrets: inherit`): a dedicated GitHub App (Contents, Pull requests, Workflows: read & write) that creates the GitHub Release + tag. Without it, `GITHUB_TOKEN` can only tag the default branch's HEAD, so one failed release-PR-merge run wedges every later run on a 403 until an operator runs `gh release create` by hand. With it, the release runs as the App while the release PR is still opened by `github-actions[bot]` (so Hermes auto-review and PR CI are unaffected). Note an App-created release fires `on: release` / `on: push: tags`, which a `GITHUB_TOKEN` one does not. No change to the caller `permissions:` above.
 
 ### [Cleanup-GHCR](.github/workflows/ghcr-cleanup.yml)
 Deletes untagged container versions from GHCR on a schedule.
