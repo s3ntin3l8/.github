@@ -97,15 +97,23 @@ name: Hermes PR Review (reusable)
 
 on:
   workflow_call:
+    # NOT `required: true`, deliberately. A dependabot-authored `pull_request` run is
+    # handed only Dependabot secrets, so with `secrets: inherit` these arrive unset, and
+    # GitHub rejects a call that omits a required secret before ANY step runs
+    # ("Secret HERMES_APP_ID is required, but not provided while calling" -- a red check
+    # on every dependency PR, which is why dependabot was excluded; seen in
+    # runway-ai-usage-tracker runs before its #250). Optional here, enforced by the
+    # "Preflight" step instead, which can tell a dependabot run (skip with a notice)
+    # from a misconfigured caller (fail with a clear error).
     secrets:
       HERMES_APP_ID:
-        required: true
+        required: false
         description: GitHub App numeric ID (from the App's settings page).
       HERMES_APP_PRIVATE_KEY:
-        required: true
+        required: false
         description: GitHub App PEM private key.
       HERMES_API_KEY:
-        required: true
+        required: false
         description: >-
           Bearer key for the hermes-01 API server (API_SERVER_KEY). Distinct from the
           App PEM. The agent uses this to authenticate the run; it mints the GitHub
@@ -293,9 +301,10 @@ jobs:
             echo "::notice::HERMES_APP_ID / HERMES_APP_PRIVATE_KEY / HERMES_API_KEY are not visible to this dependabot-authored run - skipping the review. Add them under Settings -> Secrets and variables -> Dependabot to enable auto-review of dependency PRs."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
-            # Anyone else with missing secrets is a real misconfiguration: fail loudly
-            # at the App-token step below, as before.
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+            # Anyone else with missing secrets is a real misconfiguration (they used to
+            # be `required: true`, which failed the call): fail loudly, naming them.
+            echo "::error::HERMES_APP_ID / HERMES_APP_PRIVATE_KEY / HERMES_API_KEY must all be set (present: app-id=$HAS_APP_ID, private-key=$HAS_APP_KEY, api-key=$HAS_API_KEY). Pass them with 'secrets: inherit'."
+            exit 1
           fi
 
       - name: Create GitHub App token (runner-side, for trigger resolution)
