@@ -112,6 +112,22 @@ on:
         required: false
         type: string
         default: ''
+      detect-secrets:
+        description: >
+          Scan for secrets. Set to false when the caller already runs a secrets
+          gate over the same tree (e.g. a Python job in the same workflow), so
+          the whole repository is not scanned twice per run.
+        required: false
+        type: boolean
+        default: true
+      test-pool:
+        description: >
+          Vitest worker pool (e.g. 'vmThreads'). Empty keeps Vitest's default.
+          'vmThreads' reuses one jsdom environment per worker instead of
+          building one per test file, which is markedly faster on jsdom suites.
+        required: false
+        type: string
+        default: ''
     secrets:
       CODECOV_TOKEN:
         required: false
@@ -223,7 +239,7 @@ jobs:
           path: ~/.cache/pip
           key: pip-detect-secrets-${{ runner.os }}
       - name: Detect secrets
-        if: ${{ hashFiles('.secrets.baseline') != '' }}
+        if: ${{ inputs.detect-secrets && hashFiles('.secrets.baseline') != '' }}
         continue-on-error: ${{ !inputs.strict-checks }}
         working-directory: .
         run: |
@@ -268,6 +284,7 @@ jobs:
         if: ${{ env.SHARDED == 'false' }}
         env:
           TEST_SCRIPT: ${{ inputs.test-script }}
+          TEST_POOL: ${{ inputs.test-pool }}
         run: |
           # Use the caller-specified test script (defaults to 'test').
           # If the script doesn't exist, fall back gracefully.
@@ -277,7 +294,11 @@ jobs:
           elif printf '%s' "$script_val" | grep -q "no test specified"; then
             echo "Default 'npm init' test stub detected; skipping."
           else
-            npm run "$TEST_SCRIPT"
+            pool=()
+            if [ -n "$TEST_POOL" ]; then
+              pool=(-- --pool="$TEST_POOL")
+            fi
+            npm run "$TEST_SCRIPT" "${pool[@]}"
           fi
       - name: Probe coverage artifacts
         # `hashFiles()` in an `if:` is workspace-root-relative, which would
@@ -424,6 +445,7 @@ jobs:
       - name: Test (shard ${{ matrix.shard }}/${{ inputs.test-shards }})
         env:
           TEST_SCRIPT: ${{ inputs.test-script }}
+          TEST_POOL: ${{ inputs.test-pool }}
           SHARD: ${{ matrix.shard }}
           TOTAL_SHARDS: ${{ inputs.test-shards }}
         run: |
@@ -432,7 +454,11 @@ jobs:
             echo "::error::No '$TEST_SCRIPT' script defined; test-shards > 1 requires one."
             exit 1
           fi
-          npm run "$TEST_SCRIPT" -- --shard="${SHARD}/${TOTAL_SHARDS}"
+          pool=()
+          if [ -n "$TEST_POOL" ]; then
+            pool=(--pool="$TEST_POOL")
+          fi
+          npm run "$TEST_SCRIPT" -- --shard="${SHARD}/${TOTAL_SHARDS}" "${pool[@]}"
       - name: Upload shard coverage
         # coverage-final.json is istanbul's raw per-file hit-map (NOT the
         # coverage-summary.json percentages) — test-merge needs the hit-maps to
