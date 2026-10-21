@@ -15,15 +15,32 @@ set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORKFLOW="$ROOT/.github/workflows/hermes-review.yml"
 TMP=$(mktemp -d)
-PORT=${HERMES_FAKE_PORT:-8791}
+# A random base port: a fake left behind by a killed run would otherwise hold
+# the port the next run wants, and the run would silently talk to the WRONG
+# fake (its state, not this section's).
+PORT=${HERMES_FAKE_PORT:-$((20000 + RANDOM % 20000))}
 PASS=0
 FAIL=0
 
+# Each fake gets its own port: a leftover one from an earlier (killed) run
+# would otherwise keep serving its own state to the next section, and the
+# harness would report failures that belong to nobody.
+# The port is bumped in the CALLER (not in a command substitution, which
+# would run the function in a subshell and throw the new value away), so
+# every fake really lands on a port of its own.
+next_port() { PORT=$((PORT + 1)); }
+
 cleanup() {
-  [[ -n "${FAKE_PID:-}" ]] && kill "$FAKE_PID" 2>/dev/null
+  # Every fake this run started, not just the last one: a section that ended
+  # early (a killed run, a failed assertion) would otherwise leave a fake
+  # behind, holding its port and answering the NEXT run with its own state.
+  for pid in "${FAKE_PIDS[@]:-}"; do
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null
+  done
   rm -rf "$TMP"
 }
 trap cleanup EXIT
+FAKE_PIDS=()
 
 # ── the fake gh ────────────────────────────────────────────────────────────
 # It answers the three reads the workflow does and records the writes, and it
@@ -73,6 +90,25 @@ case "$joined" in
     exit 0 ;;
   *"--method POST"*"check-runs"*) log "check-run created"; echo "${FAKE_CHECK_RUN_ID:-4242}"; exit 0 ;;
   *"--method PATCH"*"check-runs"*) log "check-run patched"; exit 0 ;;
+  *"/check-runs"*)
+    # The check runs already on a commit — the in-flight marker. The step
+    # applies its own --jq filter to this, so the fake does too.
+    # (This case must come AFTER the POST and PATCH cases: they match the
+    # same path, and a marker listing would answer them with the wrong shape.)
+    log "check-runs"
+    runs='{"total_count":1,"check_runs":[{"name":"'"${LEDGER_NAME:-Hermes review}"'","external_id":"'"${FAKE_MARKER_RUN:-run_dead}"'"}]}'
+    filter=""
+    prev=""
+    for a in "${args[@]}"; do
+      if [[ "$prev" == "--jq" ]]; then filter="$a"; fi
+      prev="$a"
+    done
+    if [[ -n "$filter" ]]; then
+      printf '%s' "$runs" | jq -r "$filter" 2>/dev/null || echo ""
+    else
+      printf '%s' "$runs"
+    fi
+    exit 0 ;;
 esac
 exit 0
 GH
@@ -93,9 +129,17 @@ PY
 
 # ── the fake Hermes ────────────────────────────────────────────────────────
 start_fake() {
+  next_port
+  export API_URL="http://127.0.0.1:$PORT"
   python3 "$ROOT/scripts/fake-hermes.py" "$PORT" "$1" &
   FAKE_PID=$!
+  FAKE_PIDS+=("$FAKE_PID")
   sleep 1
+  if ! kill -0 "$FAKE_PID" 2>/dev/null; then
+    echo "  FAIL  the fake Hermes on port $PORT did not start"
+    FAIL=$((FAIL + 1))
+    return 1
+  fi
 }
 stop_fake() { kill "$FAKE_PID" 2>/dev/null; wait "$FAKE_PID" 2>/dev/null; }
 
@@ -109,6 +153,7 @@ run_step() { # $1 = step id, $2 = expected skip value
   export GITHUB_OUTPUT="$TMP/out.$id"; : > "$GITHUB_OUTPUT"
   ( set -uo pipefail; . "$TMP/$id.sh" ) > "$TMP/log.$id" 2>&1
   got=$(grep -oP '(?<=^skip=).*' "$GITHUB_OUTPUT" 2>/dev/null | tail -1)
+  if [[ "${HERMES_HARNESS_DEBUG:-}" == "1" ]]; then echo "--- $id log:"; sed 's/^/    /' "$TMP/log.$id" | head -12; fi
   [[ "$got" == "$want" ]] && check "$id -> skip=$want" yes || check "$id -> skip='$got' (want '$want')" no
 }
 
@@ -116,6 +161,8 @@ marker() { printf '%s' "$1" > "$TMP/marker.json"; export FAKE_MARKER_FILE="$TMP/
 
 # The environment the steps read.
 export API_URL="http://127.0.0.1:$PORT" API_KEY="test-key" GH_TOKEN="test-token"
+# start_fake rewrites API_URL for the fake it starts; the steps read it from
+# the environment, so it is re-exported here.
 export REPO="acme/widgets" OWNER="acme" NUMBER="42" KIND="pr"
 export BOT_LOGIN="s3ntin3l8-hermes[bot]" SCOPE_MODE="delta"
 export LEDGER="check-run" LEDGER_NAME="Hermes review" USE_RUNS="true"
@@ -172,6 +219,76 @@ start_fake '{"dispatch_code":401,"request_log":"'"$TMP"'/requests.log"}'
 ( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.401" 2>&1; rc=$?
 [[ $rc -ne 0 ]] && check "HTTP 401 exits non-zero" yes || check "HTTP 401 exits non-zero" no
 stop_fake
+
+echo "== a 409 whose run died is retried under a deeper key =="
+export FAKE_MARKER_RUN="run_dead"
+start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,202],"request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.409" 2>&1
+: > "$TMP/requests.log"
+start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,202],"request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.409" 2>&1
+grep -q '"idempotency_key": "hermes-review:acme/widgets#42@..head111#run_dead"' "$TMP/requests.log" \
+  && check "the retry goes under a deeper key, derived from the run that died" yes \
+  || { check "the retry goes under a deeper key, derived from the run that died" no; \
+       echo "        --- gh log:"; sed 's/^/        /' "$GH_LOG" | tail -8; \
+       echo "        --- step log:"; sed 's/^/        /' "$TMP/log.409" | tail -8; \
+       echo "        --- requests:"; sed 's/^/        /' "$TMP/requests.log" | cut -c1-120 | head -4; }
+stop_fake
+
+echo "== a stuck session is retried in a fresh one =="
+export FAKE_MARKER_RUN="run_dead"
+start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,202],"conflict_code":"admission_conflict","request_log":"'"$TMP"'/requests.log"}'
+: > "$TMP/requests.log"
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.adm" 2>&1
+grep -q '"session_id": "hermes-review-acme-widgets-42-2"' "$TMP/requests.log" \
+  && check "a session that refused the turn is retried in a fresh one" yes \
+  || { check "a session that refused the turn is retried in a fresh one" no; \
+       echo "        --- step log:"; sed 's/^/        /' "$TMP/log.adm" | tail -8; \
+       echo "        --- requests:"; sed 's/^/        /' "$TMP/requests.log" | cut -c1-140 | head -4; }
+grep -q '"idempotency_key": "hermes-review:acme/widgets#42@..head111#session-2"' "$TMP/requests.log" \
+  && check "the fresh session moves the idempotency key with it" yes \
+  || check "the fresh session moves the idempotency key with it" no
+stop_fake
+
+echo "== a live run means no second dispatch =="
+export FAKE_MARKER_RUN="run_live"
+start_fake '{"run_statuses":{"run_live":"running"},"dispatch_codes":[409,202],"request_log":"'"$TMP"'/requests.log"}'
+: > "$TMP/requests.log"
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.live" 2>&1
+grep -q "already running" "$TMP/log.live" \
+  && check "a live run is reported as already running" yes \
+  || { check "a live run is reported as already running" no; \
+       sed 's/^/        /' "$TMP/log.live" | tail -6; }
+[[ $(grep -c '"method": "POST"' "$TMP/requests.log") -eq 1 ]] \
+  && check "a live run is not dispatched a second time" yes \
+  || check "a live run is not dispatched a second time" no
+stop_fake
+export FAKE_MARKER_RUN="run_dead"
+
+echo "== every attempt refused is a failure, not a dispatch =="
+start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,409,409],"conflict_code":"admission_conflict","request_log":"'"$TMP"'/requests.log"}'
+: > "$TMP/requests.log"
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.exhausted" 2>&1; rc=$?
+grep -q "NOT dispatched" "$TMP/log.exhausted" \
+  && check "an exhausted dispatch loop says the review was NOT dispatched" yes \
+  || { check "an exhausted dispatch loop says the review was NOT dispatched" no; \
+       sed 's/^/        /' "$TMP/log.exhausted" | tail -6; }
+[[ $rc -ne 0 ]] && check "an exhausted dispatch loop exits non-zero" yes \
+  || check "an exhausted dispatch loop exits non-zero" no
+stop_fake
+
+echo "== the legacy path says a refusal is a refusal =="
+export USE_RUNS="false"
+start_fake '{"legacy_code":409,"request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.legacy409" 2>&1; rc=$?
+grep -q "NOT dispatched" "$TMP/log.legacy409" \
+  && check "the legacy path says the review was NOT dispatched" yes \
+  || { check "the legacy path says the review was NOT dispatched" no; \
+       sed 's/^/        /' "$TMP/log.legacy409" | tail -6; }
+[[ $rc -ne 0 ]] && check "the legacy path exits non-zero on HTTP 409" yes \
+  || check "the legacy path exits non-zero on HTTP 409" no
+stop_fake
+export USE_RUNS="true"
 
 echo
 echo "passed: $PASS   failed: $FAIL"

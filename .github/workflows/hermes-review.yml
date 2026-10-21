@@ -592,7 +592,7 @@ jobs:
             -H "Authorization: Bearer $API_KEY" | jq -r '.status // empty')
           set -e
           case "$STATUS" in
-            queued|running|stopping|pending|started)
+            queued|running|stopping|pending|started|waiting_for_approval)
               # Still live: the marker points at a run that is still working.
               if [[ "$MARKER_SHA" == "$HEAD_SHA" ]]; then
                 echo "::notice::a review of $REPO#$NUMBER at $HEAD_SHA is already running (Hermes run $MARKER_RUN) — not queueing another one."
@@ -768,6 +768,11 @@ jobs:
             fi
             RUN_BODY=$(jq -nc --arg model "$API_MODEL" --arg input "$MSG" --arg session "$SESSION_ID" \
               '{model:$model,input:$input} + (if $session == "" then {} else {session_id:$session} end)')
+            # The dispatch is a loop: a 409 whose run has died is retried
+            # under a deeper key (see the 409 arm below), and a fresh attempt
+            # is a fresh key — never the same one twice.
+            SESSION_ATTEMPT=1
+            for ATTEMPT in 1 2 3; do
             set +e
             HTTP_CODE=$(curl -sS -m 30 -o "$RESP" -w '%{http_code}' \
               -X POST "$API_URL/v1/runs" \
@@ -793,16 +798,23 @@ jobs:
               exit 1
             fi
             if [[ "$HTTP_CODE" == "409" ]]; then
-              # Hermes holds a run for this range already. That is NOT "nothing
-              # happened": the run exists and may still be working (or may have
-              # failed). Say which, so a green check never means "nothing was
-              # dispatched" without saying what IS running.
+              # Two different refusals arrive as 409, and they need different answers:
+              #   * idempotency_key_conflict: the key holds a run for a DIFFERENT body.
+              #     The attempt behind it is over, so a retry has to go under a deeper
+              #     key — the same key would replay the dead run and nothing would happen.
+              #   * admission_conflict: Hermes' session authority refused the TURN. The
+              #     session this PR's reviews run in is stuck: it was paused on an
+              #     earlier conflict and never recovers (NousResearch/hermes-agent#142731),
+              #     so every later round for that PR is refused at the door. A fresh
+              #     session id gets the PR moving again.
+              # In neither case does the 409 mean "a review is running" — that is what
+              # the in-flight ledger is for, and it has already run: it skips when a
+              # review of this head is live and stops one that went stale.
               CONFLICT_CODE=$(jq -r '.error.code // "idempotency_key_conflict"' "$RESP" 2>/dev/null || echo idempotency_key_conflict)
-              echo "::notice::Hermes already holds a run for this review range (HTTP 409: $CONFLICT_CODE) — not dispatching another."
+              MARKER_RUN=""
+              EXISTING_STATUS=""
               if [[ "$LEDGER" == "check-run" && -n "$HEAD_SHA" ]]; then
-                # The marker for the range is on the head: it names the run and
-                # says whether it is still working.
-                # The marker for THIS range is on THIS head, so the head's own
+                # The marker for this range is on this head, so the head's own
                 # check runs are where it is.
                 MARKER_RUN=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" \
                   --jq '[.check_runs[] | select(.name == env.LEDGER_NAME and .external_id != null and .external_id != "")] | first | .external_id // empty' 2>/dev/null || echo "")
@@ -811,20 +823,69 @@ jobs:
                   EXISTING_STATUS=$(curl -sS -m 10 "$API_URL/v1/runs/$MARKER_RUN" \
                     -H "Authorization: Bearer $API_KEY" | jq -r '.status // empty')
                   set -e
-                  if [[ -n "$EXISTING_STATUS" && "$EXISTING_STATUS" != "completed" && "$EXISTING_STATUS" != "failed" && "$EXISTING_STATUS" != "cancelled" && "$EXISTING_STATUS" != "interrupted" ]]; then
-                    echo "::notice::a review of this range is still running (Hermes run $MARKER_RUN, $EXISTING_STATUS) — it will post to the PR itself."
-                  elif [[ -z "$EXISTING_STATUS" ]]; then
-                    # The status lookup failed (API unreachable, run unknown, bad
-                    # JSON): we do NOT know whether the run ended, so don't claim it.
-                    echo "::warning::Hermes holds run $MARKER_RUN for this range, but its status could not be read (the lookup returned nothing) — it may still be running. Check the run on hermes-01 before asking again."
-                  else
-                    echo "::warning::the run Hermes holds for this range has ended ($EXISTING_STATUS, run $MARKER_RUN) and its request no longer matches the current one (the shared prompt changed) — ask again to start a fresh attempt."
-                  fi
-                else
-                  echo "::warning::Hermes holds a run for this range but no ledger marker names it, so whether it is still running is unknown — this green check does not mean a review is in progress."
                 fi
               fi
-              exit 0
+              if [[ "$CONFLICT_CODE" == "admission_conflict" ]]; then
+                # The SESSION refused the turn. The key was never the issue: the
+                # session this PR's reviews run in is stuck (it was paused on an
+                # earlier conflict and never recovers), so every later round for
+                # this PR is refused at the door. A fresh session id gets the PR
+                # moving again.
+                #
+                # The suffix is a number, so the id keeps the shape
+                # `hermes-review-<owner>-<repo>-<pr>[-<n>]` that Hermes is asked
+                # to recognise (NousResearch/hermes-agent#142647) — a session id
+                # it cannot classify is dropped by the salvage path.
+                #
+                # The body carries the session id, so the idempotency key moves
+                # with it: a key that stayed would conflict with the body it holds.
+                if [[ -n "$MARKER_RUN" && -n "$EXISTING_STATUS" ]]; then
+                  case "$EXISTING_STATUS" in
+                    queued|running|stopping|pending|started|waiting_for_approval)
+                      # A review of this PR is live: the session is busy, not stuck.
+                      echo "::notice::a review of this pull request is already running (Hermes run $MARKER_RUN, $EXISTING_STATUS) — it will post to the PR itself."
+                      exit 0
+                      ;;
+                  esac
+                fi
+                SESSION_ATTEMPT=$(( SESSION_ATTEMPT + 1 ))
+                echo "::notice::Hermes' session authority refused the turn for session '$SESSION_ID' (HTTP 409: admission_conflict) — that session is stuck and refuses every later round of this pull request; retrying in a fresh one."
+                SESSION_ID="${SESSION_ID}-${SESSION_ATTEMPT}"
+                IDEMPOTENCY_KEY="${IDEMPOTENCY_KEY}#session-${SESSION_ATTEMPT}"
+                RUN_BODY=$(jq -nc --arg model "$API_MODEL" --arg input "$MSG" --arg session "$SESSION_ID" \
+                  '{model:$model,input:$input} + (if $session == "" then {} else {session_id:$session} end)')
+                continue
+              fi
+              if [[ -z "$MARKER_RUN" ]]; then
+                # No marker names the run the key holds, so we cannot say whether
+                # it is still working — and it is the KEY that conflicts here, so
+                # there is nothing else to try.
+                echo "::warning::Hermes holds a run for this range but no ledger marker names it, so whether it is still running is unknown — this green check does not mean a review is in progress."
+                exit 0
+              fi
+              case "$EXISTING_STATUS" in
+                queued|running|stopping|pending|started|waiting_for_approval)
+                  # A review of this PR is live. Do not dispatch a second one.
+                  echo "::notice::a review of this pull request is already running (Hermes run $MARKER_RUN, $EXISTING_STATUS) — it will post to the PR itself."
+                  exit 0
+                  ;;
+                completed|failed|cancelled|interrupted)
+                  # The attempt is over. Retry under a deeper key, derived from the
+                  # run that died — the key is a function of what failed, not of the
+                  # clock, so a repeat of the retry replays it instead of dispatching
+                  # again.
+                  echo "::notice::the attempt Hermes held for this range ended ($EXISTING_STATUS, run $MARKER_RUN) — starting a fresh one under a deeper key."
+                  IDEMPOTENCY_KEY="$IDEMPOTENCY_KEY#$MARKER_RUN"
+                  continue
+                  ;;
+                *)
+                  # The status lookup failed (API unreachable, run unknown, bad
+                  # JSON): we do NOT know whether the run ended, so don't claim it
+                  # and don't dispatch a second review of the same range.
+                  echo "::warning::Hermes holds run $MARKER_RUN for this range, but its status could not be read (the lookup returned nothing) — it may still be running. Check the run on hermes-01 before asking again."
+                  exit 0
+                  ;;
+              esac
             fi
             if [[ "$HTTP_CODE" != "202" && "$HTTP_CODE" != "200" ]]; then
               echo "::error::Hermes API returned HTTP $HTTP_CODE — review NOT dispatched: $(head -c 300 "$RESP" | tr '\n' ' ')"
@@ -835,7 +896,16 @@ jobs:
               echo "::error::Hermes accepted the request but returned no run_id — cannot track the review."
               exit 1
             fi
-            echo "::notice::dispatched Hermes run $RUN_ID; polling until it finishes."
+            break
+            done
+            if [[ -z "${RUN_ID:-}" ]]; then
+              # Every attempt was refused (the loop ran out). Say so: falling
+              # through here would print a "dispatched" notice for a run that
+              # was never started.
+              echo "::error::Every attempt to dispatch the review was refused (HTTP 409) — review NOT dispatched. Hermes holds a run for this range, or its session refused the turn; nothing was queued."
+              exit 1
+            fi
+            echo "::notice::dispatched Hermes run $RUN_ID (attempt $ATTEMPT, idempotency key $IDEMPOTENCY_KEY); polling until it finishes."
             REPLAYED=$(jq -r '.replayed // false' "$RESP")
             if [[ "$REPLAYED" == "true" ]]; then
               echo "::notice::Hermes replayed the existing run $RUN_ID for this range (idempotency key $IDEMPOTENCY_KEY) — no second review was dispatched."
@@ -943,7 +1013,8 @@ jobs:
             SESSION_HEADER=(-H "X-Hermes-Session-Id: $SESSION_ID")
           fi
           set +e
-          HTTP_CODE=$(curl -sS -m 20 -o /dev/null -w '%{http_code}' \
+          LEGACY_RESP=$(mktemp)
+          HTTP_CODE=$(curl -sS -m 20 -o "$LEGACY_RESP" -w '%{http_code}' \
             -X POST "$API_URL/v1/chat/completions" \
             -H "Authorization: Bearer $API_KEY" \
             -H "Content-Type: application/json" \
@@ -953,7 +1024,13 @@ jobs:
             2>/dev/null)
           CURL_EXIT=$?
           set -e
-          echo "::notice::relayed request to hermes-01 (HTTP $HTTP_CODE, curl exit $CURL_EXIT); agent runs async and posts results to GitHub itself."
+          # The outcome is NOT visible from here: the API holds the connection
+          # open until the agent finishes (minutes), so the -m 20 cap always
+          # trips and the runner sees 000/exit 28 whether the review started or
+          # not. Say that, instead of claiming it was relayed. (The Runs API
+          # path above is the one that can tell them apart: it has a run id to
+          # poll.) The review, if it started, posts to the PR itself.
+          echo "::notice::request sent to hermes-01 (HTTP $HTTP_CODE, curl exit $CURL_EXIT); the API holds the connection until the review finishes, so the outcome is not visible from here — the review, if it started, posts to the PR itself."
           if [[ "$HTTP_CODE" == "401" || "$HTTP_CODE" == "403" ]]; then
             echo "::error::Hermes API rejected the key (HTTP $HTTP_CODE) — check HERMES_API_KEY secret."
             exit 1
@@ -963,6 +1040,19 @@ jobs:
             # is the point — the old path reported this as a successful relay, so a
             # saturated gateway read as "relayed" and invited another request.
             echo "::error::Hermes is at its concurrent-run cap (HTTP 429) — review NOT dispatched. Wait for a running review to finish and try again."
+            exit 1
+          fi
+          if [[ "$HTTP_CODE" == "409" ]]; then
+            # Hermes REFUSED the turn: its session authority will not admit a turn
+            # into a session that is busy, paused or stale (HTTP 409,
+            # "admission_conflict"). Nothing was dispatched — no run was created and
+            # nothing was queued. Say so loudly: this path used to fall through to
+            # the "accepted and running" catch-all below, so the run went GREEN and
+            # said "relayed" while nothing happened. A green run read as "asked",
+            # which invited another request — that is how one PR collected nine
+            # @mentions and no re-review.
+            CONFLICT_CODE=$(jq -r '.error.code // "admission_conflict"' "$LEGACY_RESP" 2>/dev/null || echo admission_conflict)
+            echo "::error::Hermes refused the request (HTTP 409: $CONFLICT_CODE) — review NOT dispatched. No run was created and nothing was queued: a review for this PR is already admitted, or its review session is stuck. Check for a running review before asking again."
             exit 1
           fi
           # curl exit 6 (DNS failure) / 7 (connection refused): the server was reachable
