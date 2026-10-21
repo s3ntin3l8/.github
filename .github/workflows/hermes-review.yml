@@ -128,6 +128,16 @@ on:
           reachable from the runner over the LAN; points to the review-bot profile prefix
           on the multiplexed gateway (port 8642). Port 8643 is kept as a compatibility
           proxy on hermes-01.
+      mention-match:
+        required: false
+        type: string
+        default: line-start
+        description: >-
+          How the "@<mention-trigger>" must appear in an on-demand comment. "line-start"
+          (default) requires a line that STARTS with it, so a status report that merely
+          mentions the bot ("Addressed the review from @<slug> in abc123") does not start a
+          run; quoted lines and code blocks are ignored. "anywhere" restores the old
+          substring match.
       hermes-api-model:
         required: false
         type: string
@@ -307,22 +317,6 @@ jobs:
             exit 1
           fi
 
-      - name: Create GitHub App token (runner-side, for trigger resolution)
-        id: app-token
-        if: steps.preflight.outputs.skip != 'true'
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
-        with:
-          app-id: ${{ secrets.HERMES_APP_ID }}
-          private-key: ${{ secrets.HERMES_APP_PRIVATE_KEY }}
-          # Least privilege: this token is only used by the re-trigger guard, which
-          # reads reviews (pulls/N/reviews) and comments (issues/N/comments), and by
-          # the review-scope/in-flight steps, which read the PR head and the bot's
-          # last review and write the "review in flight" check run. The agent mints
-          # its own full token via scripts/app-token.sh.
-          permission-pull-requests: read
-          permission-issues: read
-          permission-checks: write
-
       # Early exit unless the comment actually contains the configured mention.
       # ONLY enforced in on-demand mode. In auto mode the caller's `on:` decides when
       # to run (e.g. pull_request opened), so we never skip on mention — but we still
@@ -336,6 +330,7 @@ jobs:
         id: check-mention
         env:
           MENTION: ${{ inputs.mention-trigger }}
+          MENTION_MATCH: ${{ inputs.mention-match }}
           MODE: ${{ inputs.mode }}
           BODY: ${{ github.event.comment.body || github.event.review.body || github.event.issue.body }}
           PREFLIGHT_SKIP: ${{ steps.preflight.outputs.skip }}
@@ -351,12 +346,59 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [[ -z "${BODY:-}" ]] || ! echo "$BODY" | grep -q "@$MENTION"; then
-            echo "::notice::No '@$MENTION' mention found — skipping."
+          # --- addressed(): keep byte-identical in hermes-review.yml and claude-code.yml
+          # (scripts/test-mention-match.sh fails if they drift) ---
+          # True when some line of the text STARTS with the handle (after whitespace), i.e. the
+          # comment addresses the bot. A mention in the middle of a sentence ("Addressed the
+          # review from @claude in abc123") only describes something to a human reader and must
+          # not start a run. Quoted lines (> ...) and fenced code blocks are ignored, the match is
+          # case-insensitive (GitHub handles are), a leading list marker or **bold** is allowed
+          # ("- @claude review", "**@claude** review"), and the handle must end at a word boundary so
+          # "@claudeX" and "@claude-foo" do not count. s3ntin3l8/.github#41, #42.
+          addressed() { # $1 = text, $2 = handle without the leading @
+            printf '%s\n' "$1" | tr -d '\r' | awk -v h="@$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" '
+              /^[ \t]*(```|~~~)/ { fence = !fence; next }
+              fence || /^[ \t]*>/ { next }
+              { line = tolower($0); sub(/^[ \t]+/, "", line)
+                sub(/^([-*+]|[0-9]+[.)])[ \t]+/, "", line); sub(/^[*_]+/, "", line)
+                if (index(line, h) == 1) {
+                  nxt = substr(line, length(h) + 1, 1)
+                  if (nxt !~ /^[A-Za-z0-9_-]$/) found = 1
+                } }
+              END { exit !found }'
+          }
+          # --- end addressed() ---
+          if [[ "${MENTION_MATCH:-line-start}" == "anywhere" ]]; then
+            matched() { grep -qiF "@$MENTION" <<< "$1"; }
+          else
+            matched() { addressed "$1" "$MENTION"; }
+          fi
+          if [[ -z "${BODY:-}" ]] || ! matched "$BODY"; then
+            echo "::notice::No '@$MENTION' addressed to the bot (a line starting with it) — skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0   # not a failure: leave the run green
           fi
           echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub App token (runner-side, for trigger resolution)
+        id: app-token
+        # After `Check mention` on purpose: a comment that does not address the bot (or a
+        # dependabot run without secrets) skips here, before any secret is used or a token
+        # is minted on the self-hosted runner. `Check mention` already folds the
+        # preflight result into its `skip` output.
+        if: steps.check-mention.outputs.skip != 'true'
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.HERMES_APP_ID }}
+          private-key: ${{ secrets.HERMES_APP_PRIVATE_KEY }}
+          # Least privilege: this token is only used by the re-trigger guard, which
+          # reads reviews (pulls/N/reviews) and comments (issues/N/comments), and by
+          # the review-scope/in-flight steps, which read the PR head and the bot's
+          # last review and write the "review in flight" check run. The agent mints
+          # its own full token via scripts/app-token.sh.
+          permission-pull-requests: read
+          permission-issues: read
+          permission-checks: write
 
       # Resolve WHAT was mentioned, so we can route to the right prompt and tell the
       # agent which PR/issue to act on. Uses the runner-side App token (read-only view).
