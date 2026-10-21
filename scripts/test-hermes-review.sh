@@ -43,7 +43,13 @@ case "$joined" in
     # A real review list, run through the workflow's own --jq filter, so the
     # filter is exercised here and not only in a consumer run.
     log "reviews"
-    reviews='[{"user":{"type":"Bot","login":"hermes[bot]"},"state":"APPROVED","commit_id":"'"${FAKE_LAST_REVIEWED:-}"'"}]'
+    # Hermes' own review at FAKE_LAST_REVIEWED, plus (optionally) another bot's review
+    # at FAKE_OTHER_BOT_REVIEWED, which must never count (s3ntin3l8/.github#99).
+    reviews='[{"user":{"type":"Bot","login":"s3ntin3l8-hermes[bot]"},"state":"APPROVED","commit_id":"'"${FAKE_LAST_REVIEWED:-}"'"}'
+    if [[ -n "${FAKE_OTHER_BOT_REVIEWED:-}" ]]; then
+      reviews+=',{"user":{"type":"Bot","login":"claude[bot]"},"state":"COMMENTED","commit_id":"'"${FAKE_OTHER_BOT_REVIEWED}"'"}'
+    fi
+    reviews+=']'
     filter=""
     prev=""
     for a in "${args[@]}"; do
@@ -134,6 +140,15 @@ run_step scope true          # already reviewed at this head -> skip
 export FAKE_LAST_REVIEWED="old999"
 run_step scope false         # a previous round exists -> delta, not a skip
 export FAKE_LAST_REVIEWED=""
+# Another bot's review on the head is not a Hermes review: no skip, no delta base.
+export FAKE_OTHER_BOT_REVIEWED="head111"
+run_step scope false
+grep -q '^base=$' "$TMP/out.scope" && check "scope: another bot's review sets no delta base" yes || check "scope: another bot's review sets no delta base" no
+# ...and it does not displace Hermes' own earlier review as the base.
+export FAKE_LAST_REVIEWED="old999"
+run_step scope false
+grep -q '^base=old999$' "$TMP/out.scope" && check "scope: the base stays Hermes' own review" yes || check "scope: the base stays Hermes' own review" no
+export FAKE_LAST_REVIEWED="" FAKE_OTHER_BOT_REVIEWED=""
 
 echo "== the in-flight marker =="
 start_fake '{"run_status":"running","request_log":"'"$TMP"'/requests.log"}'
