@@ -848,8 +848,13 @@ jobs:
           SESSION_ATTEMPT=1
           if [[ "$TARGET_KIND" == "pr" && -n "$BASE_SHA" && "$LEDGER" == "check-run" ]]; then
             set +e
-            REMEMBERED=$(gh api "repos/$REPO/commits/$BASE_SHA/check-runs" \
-              --jq '[.check_runs[] | select(.name == env.LEDGER_NAME)] | last | .output.summary // empty' 2>/dev/null \
+            # The NEWEST marker on that commit: the endpoint answers newest
+            # first (ids strictly descending), so `last` picked the OLDEST one
+            # -- the stuck base session, which is exactly the id this feature
+            # exists to get away from. Sorted by id instead, so the answer does
+            # not depend on the endpoint's order.
+            REMEMBERED=$(gh api "repos/$REPO/commits/$BASE_SHA/check-runs?per_page=100" \
+              --jq '[.check_runs[] | select(.name == env.LEDGER_NAME) | {id: .id, summary: (.output.summary // "")}] | sort_by(.id) | last | .summary // empty' 2>/dev/null \
               | sed -n 's/^session: //p' | head -1)
             set -e
             if [[ -n "$REMEMBERED" && "$REMEMBERED" =~ ^${BASE_SESSION_ID}(-[0-9]+)?$ ]]; then
@@ -935,8 +940,10 @@ jobs:
               if [[ "$LEDGER" == "check-run" && -n "$HEAD_SHA" ]]; then
                 # The marker for this range is on this head, so the head's own
                 # check runs are where it is.
-                MARKER_RUN=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" \
-                  --jq '[.check_runs[] | select(.name == env.LEDGER_NAME and .external_id != null and .external_id != "")] | first | .external_id // empty' 2>/dev/null || echo "")
+                # The NEWEST marker on this head, by id -- the endpoint's own
+                # order is not the contract.
+                MARKER_RUN=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
+                  --jq '[.check_runs[] | select(.name == env.LEDGER_NAME and .external_id != null and .external_id != "") | {id: .id, run: .external_id}] | sort_by(.id) | last | .run // empty' 2>/dev/null || echo "")
                 if [[ -n "$MARKER_RUN" ]]; then
                   set +e
                   EXISTING_STATUS=$(curl -sS -m 10 "$API_URL/v1/runs/$MARKER_RUN" \

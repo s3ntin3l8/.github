@@ -107,17 +107,30 @@ case "$joined" in
     # (This case must come AFTER the POST and PATCH cases: they match the
     # same path, and a marker listing would answer them with the wrong shape.)
     log "check-runs"
-    runs='{"total_count":1,"check_runs":[{"name":"'"${LEDGER_NAME:-Hermes review}"'","external_id":"'"${FAKE_MARKER_RUN-run_dead}"'","output":{"summary":"'"${FAKE_MARKER_SESSION:+session: $FAKE_MARKER_SESSION}"'"}}]}'
+    # A second marker on the same commit, so a test can check which one wins:
+    # the endpoint answers newest first, so the NEWEST marker is the one the
+    # next round has to continue in.
+    second=''
+    if [[ -n "${FAKE_MARKER2_SESSION:-}" ]]; then
+      second=',{"id":'"${FAKE_MARKER2_ID:-800}"',"name":"'"${LEDGER_NAME:-Hermes review}"'","external_id":"'"${FAKE_MARKER2_RUN-run_old}"'","output":{"summary":"session: '"$FAKE_MARKER2_SESSION"'"}}'
+    fi
+    runs='{"total_count":2,"check_runs":[{"id":'"${FAKE_MARKER_ID:-900}"',"name":"'"${LEDGER_NAME:-Hermes review}"'","external_id":"'"${FAKE_MARKER_RUN-run_dead}"'","output":{"summary":"'"${FAKE_MARKER_SESSION:+session: $FAKE_MARKER_SESSION}"'"}}'"$second"']}'
     filter=""
     prev=""
+    slurp=0
     for a in "${args[@]}"; do
       if [[ "$prev" == "--jq" ]]; then filter="$a"; fi
+      [[ "$a" == "--slurp" ]] && slurp=1
       prev="$a"
     done
+    # `gh api --paginate --slurp` would wrap the pages in an array; the
+    # workflow asks for one page, so the fake answers the object itself.
+    payload="$runs"
+    [[ "$slurp" == "1" ]] && payload="[$runs]"
     if [[ -n "$filter" ]]; then
-      printf '%s' "$runs" | jq -r "$filter" 2>/dev/null || echo ""
+      printf '%s' "$payload" | jq -r "$filter" 2>/dev/null || echo ""
     else
-      printf '%s' "$runs"
+      printf '%s' "$payload"
     fi
     exit 0 ;;
 esac
@@ -335,6 +348,23 @@ grep -q "output\[summary\]=session: hermes-review-acme-widgets-42-2" "$GH_LOG" \
   && check "the in-flight marker records the session it ran in" yes \
   || { check "the in-flight marker records the session it ran in" no; tail -3 "$GH_LOG"; }
 stop_fake
+# (2b) with two markers on the base commit, the NEWEST one wins
+export FAKE_MARKER_SESSION="hermes-review-acme-widgets-42"
+export FAKE_MARKER2_SESSION="hermes-review-acme-widgets-42-2"
+# The ids decide, not the position: the OLDER marker comes first in the
+# payload (the endpoint answers newest first, but the answer must not depend
+# on that) and the NEWER one has the higher id.
+export FAKE_MARKER_ID=800 FAKE_MARKER2_ID=950
+: > "$TMP/requests.log"
+start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.newest" 2>&1
+grep -q '"session_id": "hermes-review-acme-widgets-42-2"' "$TMP/requests.log" \
+  && check "the newest marker wins, not the oldest" yes \
+  || { check "the newest marker wins, not the oldest" no; sed 's/^/        /' "$TMP/requests.log" | cut -c1-200 | head -3; }
+stop_fake
+unset FAKE_MARKER2_SESSION
+export FAKE_MARKER_ID=900
+
 export FAKE_MARKER_SESSION="evil/../x"
 : > "$TMP/requests.log"
 start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
