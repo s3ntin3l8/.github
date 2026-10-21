@@ -671,6 +671,13 @@ jobs:
             REPO_NAME="${REPO#*/}"
             OWNER_SLUG=$(printf '%s' "$OWNER" | tr -c 'A-Za-z0-9_-' '-')
             REPO_SLUG=$(printf '%s' "$REPO_NAME" | tr -c 'A-Za-z0-9_-' '-')
+            # Lower-cased: GitHub's owner and repository names are case-insensitive,
+            # so a remote spelled "Listenarr" and one spelled "listenarr" are the
+            # same pull request — and the relay lower-cases too, so the two
+            # entry points would otherwise disagree on the session id and the
+            # idempotency key (two sessions, two dispatches, no shared history).
+            OWNER_SLUG=$(printf '%s' "$OWNER_SLUG" | tr '[:upper:]' '[:lower:]')
+            REPO_SLUG=$(printf '%s' "$REPO_SLUG" | tr '[:upper:]' '[:lower:]')
             SESSION_ID="hermes-review-${OWNER_SLUG}-${REPO_SLUG}-$TARGET_NUMBER"
           fi
           if [[ -n "$HEAD_SHA" ]]; then
@@ -701,7 +708,11 @@ jobs:
           if [[ "$USE_RUNS" == "true" ]]; then
             RESP=$(mktemp)
             if [[ "$TARGET_KIND" == "pr" && -n "$HEAD_SHA" ]]; then
-              IDEMPOTENCY_KEY="hermes-review:$REPO#$TARGET_NUMBER@$BASE_SHA..$HEAD_SHA"
+              # Lower-cased for the same reason as the session id: the relay
+              # lower-cases, and a key that depends on the case of the remote
+              # would let the two entry points dispatch the same range twice.
+              KEY_REPO=$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')
+              IDEMPOTENCY_KEY="hermes-review:$KEY_REPO#$TARGET_NUMBER@$BASE_SHA..$HEAD_SHA"
             else
               # An issue triage has no commit to pin; keep the per-run key so a triage
               # request is never replayed into a stale one.
@@ -734,7 +745,31 @@ jobs:
               exit 1
             fi
             if [[ "$HTTP_CODE" == "409" ]]; then
-              echo "::notice::Hermes reports a conflicting run for this request (HTTP 409: $(jq -r '.error.code // "idempotency_key_conflict"' "$RESP" 2>/dev/null || echo idempotency_key_conflict)) — a review of this range already exists; not dispatching another."
+              # Hermes holds a run for this range already. That is NOT "nothing
+              # happened": the run exists and may still be working (or may have
+              # failed). Say which, so a green check never means "nothing was
+              # dispatched" without saying what IS running.
+              CONFLICT_CODE=$(jq -r '.error.code // "idempotency_key_conflict"' "$RESP" 2>/dev/null || echo idempotency_key_conflict)
+              echo "::notice::Hermes already holds a run for this review range (HTTP 409: $CONFLICT_CODE) — not dispatching another."
+              if [[ "$LEDGER" == "check-run" && -n "$HEAD_SHA" ]]; then
+                # The marker for the range is on the head: it names the run and
+                # says whether it is still working.
+                # The marker for THIS range is on THIS head, so the head's own
+                # check runs are where it is.
+                MARKER_RUN=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" \
+                  --jq '[.check_runs[] | select(.name == env.LEDGER_NAME and .external_id != null and .external_id != "")] | first | .external_id // empty' 2>/dev/null || echo "")
+                if [[ -n "$MARKER_RUN" ]]; then
+                  set +e
+                  EXISTING_STATUS=$(curl -sS -m 10 "$API_URL/v1/runs/$MARKER_RUN" \
+                    -H "Authorization: Bearer $API_KEY" | jq -r '.status // empty')
+                  set -e
+                  if [[ -n "$EXISTING_STATUS" && "$EXISTING_STATUS" != "completed" && "$EXISTING_STATUS" != "failed" && "$EXISTING_STATUS" != "cancelled" && "$EXISTING_STATUS" != "interrupted" ]]; then
+                    echo "::notice::a review of this range is still running (Hermes run $MARKER_RUN, $EXISTING_STATUS) — it will post to the PR itself."
+                  else
+                    echo "::warning::the run Hermes holds for this range has ended ($EXISTING_STATUS, run $MARKER_RUN) and its request no longer matches the current one (the shared prompt changed) — ask again to start a fresh attempt."
+                  fi
+                fi
+              fi
               exit 0
             fi
             if [[ "$HTTP_CODE" != "202" && "$HTTP_CODE" != "200" ]]; then
