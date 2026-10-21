@@ -16,6 +16,13 @@ export GITHUB_TOKEN="$(~/.h....sh)"   # scripts/app-token.sh signs a JWT -> inst
 - TARGET       : the PR number (e.g. `123`)
 - REPO         : "owner/repo"
 Read these from the message you were given. Do not ask the human for them.
+- HEAD_SHA     : the commit to review. The message may name it explicitly
+                 ("Review the pull request at commit <sha>"). When it does, review
+                 THAT commit — not whatever the PR head happens to be when you read it.
+                 A review that silently covers a newer head than the one requested is
+                 worse than no review: the author cannot tell which code was read.
+- REVIEW_RANGE : the commits a follow-up round covers ("<base>..<head>"). When the
+                 message names one, review ONLY that range (see step 2).
 
 # Hard constraints
 - DO NOT `git push`, `git commit`, merge, or close the PR. Submitting a formal
@@ -30,20 +37,37 @@ Read these from the message you were given. Do not ask the human for them.
   GitHub allows you to submit `APPROVE` and `REQUEST_CHANGES` on all user-authored PRs
   (including the repository owner's). Do NOT downgrade to `COMMENT` under the false
   belief that you cannot approve.
+- Post EXACTLY ONE review per request. Never post a second review of the same
+  request, and never review a commit you were not asked about.
 
 # Procedure
-1. `gh pr view $TARGET --json number,headRefOid,baseRefName,title,body` to get
-   HEAD_SHA (`headRefOid`) and BASE_REF (`baseRefName`).
-2. Fetch the diff:
+1. Read the head and the range:
+   ```bash
+   gh pr view $TARGET --json number,headRefOid,baseRefName,title,body
+   ```
+   `headRefOid` is the PR's CURRENT head. If the message named a HEAD_SHA and it
+   differs from `headRefOid`, the head moved after this request was made: review the
+   requested HEAD_SHA, and say in the review body that the head has moved on. If the
+   message named no HEAD_SHA, review the current head.
+2. Fetch what to review:
    ```bash
    gh api repos/$REPO/pulls/$TARGET --jq '.body'   # inspect
    git clone --depth 1 "https://x-access-token:$GITHUB_TOKEN@github.com/$REPO.git" /tmp/review-$TARGET
    cd /tmp/review-$TARGET
    git fetch origin "$BASE_REF" "$HEAD_SHA"
-   git diff "$BASE_REF...$HEAD_SHA" --stat   # scope
    ```
+   - Follow-up round (the message named a REVIEW_RANGE `<base>..<head>`): review that
+     range only — `git diff <base>..<head> --stat` for the scope. If `<base>` is not an
+     ancestor of `<head>` (the PR was rebased), fall back to the full diff
+     `git diff "$BASE_REF...$HEAD_SHA"` and say so.
+   - First round (no REVIEW_RANGE): the whole diff — `git diff "$BASE_REF...$HEAD_SHA" --stat`.
+   A follow-up round is NOT a fresh review of the whole PR: the earlier rounds are in
+   the history of this session. Do not re-report what an earlier round already found.
+   DO flag anything in the new range that interacts with an earlier finding, and state
+   whether the earlier round's findings are addressed.
 3. Per changed file: read full context with the file tool, then
-   `git diff "$BASE_REF...$HEAD_SHA" -- <file>`.
+   `git diff "$BASE_REF...$HEAD_SHA" -- <file>` (or the REVIEW_RANGE diff, for a
+   follow-up round).
 4. Optionally run a quick smoke test if the repo has one (e.g. `pytest -q`).
    Do NOT block on a full suite.
 5. Review against: correctness (edge cases, error paths, concurrency), security
@@ -57,7 +81,7 @@ Read these from the message you were given. Do not ask the human for them.
                        closed PRs. Do NOT use COMMENT on standard open PRs; make a firm,
                        decisive choice between APPROVE and REQUEST_CHANGES.
 7. POST the review. Write JSON to a file to avoid shell-quoting pain, then inject
-   the HEAD SHA with jq:
+   the HEAD SHA with jq (use the SHA you REVIEWED, not the PR's current head):
    ```bash
    cat > /tmp/review-$TARGET/review.json <<'JSON'
    {
