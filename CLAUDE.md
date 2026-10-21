@@ -95,6 +95,13 @@ When you change what permissions a workflow needs, update the per-workflow
   Codecov-upload steps use for their `if:` condition. The Codecov
   `directory:` input is prefixed with `WD_PREFIX` so it stays
   workspace-root-relative regardless of the working directory.
+- **Secrets scan and test isolation.** `ci-python` and `ci-node` both take
+  `detect-secrets` (default `true`) and `detect-secrets-scope` (`all`|`changed`) so a
+  repo with a Python and a Node job scans once. The `changed` scope writes its NUL-
+  delimited file list to `$RUNNER_TEMP` (never a fixed `/tmp` path: a self-hosted runner
+  can host two jobs) and must not fail open. `ci-python` runs pytest with a throwaway
+  `HOME`/XDG root exposed as `TEST_ISOLATION_ROOT`; `test-parallel` (xdist) and
+  `ci-node`'s `test-pool` (Vitest) are opt-in speedups. All documented in README.md.
 - **Action versions** are bumped by Dependabot (the `github-actions` ecosystem is
   configured) — don't hand-pin unless fixing a specific break.
 
