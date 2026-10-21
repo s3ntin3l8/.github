@@ -149,13 +149,18 @@ jobs:
         run: |
           if command -v detect-secrets-hook &> /dev/null && [ -f .secrets.baseline ]; then
             if [ "$SCOPE" != "changed" ]; then
-              git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+              git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline --
               exit 0
             fi
             # 'changed' scope: only the files this push touched can have
-            # introduced a secret. The baseline is keyed by filename and line
-            # number, so a file that did not change keeps its baseline entry
-            # and the scan stays consistent.
+            # introduced a secret.
+            #
+            # detect-secrets matches a known secret by filename, hash and
+            # type -- not by line number. A secret that shifts lines is still
+            # recognised, and the hook rewrites the baseline's line number
+            # and exits 3 rather than reporting the secret as new. That is
+            # why a changed file whose baselined secret moved still fails the
+            # build until the baseline is refreshed.
             base=""
             for candidate in "$PR_BASE_SHA" "$MERGE_GROUP_BASE_SHA" "$PUSH_BEFORE_SHA"; do
               if [ -n "$candidate" ] \
@@ -167,16 +172,28 @@ jobs:
             done
             if [ -z "$base" ]; then
               echo "::notice::No base commit available; scanning the whole tree."
-              git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+              git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline --
               exit 0
             fi
             echo "Scanning the files changed since $base"
-            git diff --name-only --diff-filter=ACMR "$base" HEAD -- > /tmp/changed-files.txt
-            if [ ! -s /tmp/changed-files.txt ]; then
-              echo "No changed files to scan."
+            # The file list is NUL-delimited and unquoted. A path with
+            # whitespace in it must not be split into several arguments, and a
+            # path with non-ASCII characters must not be C-quoted -- either
+            # would make detect-secrets skip the file and report a clean
+            # scan. `--` ends the option list, so a filename that starts with
+            # a dash is a filename and not an option.
+            git -c core.quotepath=false diff --name-only -z --diff-filter=ACMR "$base" HEAD -- \
+              > /tmp/scanned-files.bin
+            # The files the baseline listed before this change, so removing a
+            # baseline entry for a file this push did not touch is still
+            # caught: the secret is found, and with no entry it is new.
+            git show "$base:.secrets.baseline" 2>/dev/null \
+              | jq -j '.results | keys[] | ., "\u0000"' >> /tmp/scanned-files.bin || true
+            if [ ! -s /tmp/scanned-files.bin ]; then
+              echo "No files to scan."
               exit 0
             fi
-            xargs -a /tmp/changed-files.txt detect-secrets-hook --baseline .secrets.baseline
+            xargs -0 -a /tmp/scanned-files.bin detect-secrets-hook --baseline .secrets.baseline --
           fi
       - name: Dependency security scan
         # Advisory by default (continue-on-error): pinned/held major versions
@@ -198,13 +215,28 @@ jobs:
           COVERAGE_SOURCE: ${{ inputs.coverage-source }}
           COVERAGE_FAIL_UNDER: ${{ inputs.coverage-fail-under }}
           TEST_PARALLEL: ${{ inputs.test-parallel }}
+          # The suite gets a throwaway HOME and XDG directories, so a test
+          # that reads the environment cannot reach the runner's real files.
+          # TEST_ISOLATION_ROOT carries the root so the repository's own
+          # conftest can give each parallel worker its own config root --
+          # without that, the workers share one database file.
+          TEST_ISOLATION_ROOT: ${{ runner.temp }}/test-isolation
         run: |
           if command -v pytest &> /dev/null; then
+            mkdir -p "$TEST_ISOLATION_ROOT"
             parallel=()
             if [ -n "$TEST_PARALLEL" ]; then
               parallel=(-n "$TEST_PARALLEL" --dist loadfile)
             fi
-            pytest "${parallel[@]}" --cov="$COVERAGE_SOURCE" --cov-report=xml --junitxml=junit.xml --cov-fail-under="$COVERAGE_FAIL_UNDER"
+            HOME="$TEST_ISOLATION_ROOT" \
+            USERPROFILE="$TEST_ISOLATION_ROOT" \
+            APPDATA="$TEST_ISOLATION_ROOT/AppData/Roaming" \
+            LOCALAPPDATA="$TEST_ISOLATION_ROOT/AppData/Local" \
+            XDG_CONFIG_HOME="$TEST_ISOLATION_ROOT/.config" \
+            XDG_DATA_HOME="$TEST_ISOLATION_ROOT/.local/share" \
+              pytest "${parallel[@]}" --basetemp "$TEST_ISOLATION_ROOT/pytest-tmp" \
+                --cov="$COVERAGE_SOURCE" --cov-report=xml --junitxml=junit.xml \
+                --cov-fail-under="$COVERAGE_FAIL_UNDER"
           fi
       - name: Upload coverage reports to Codecov
         continue-on-error: true  # reporting only; a Codecov outage must not fail CI

@@ -120,6 +120,14 @@ on:
         required: false
         type: boolean
         default: true
+      detect-secrets-scope:
+        description: >
+          'all' scans every tracked file; 'changed' scans only the files that
+          differ from the base commit. 'changed' needs the full history in the
+          checkout, so it deepens the fetch.
+        required: false
+        type: string
+        default: 'all'
       test-pool:
         description: >
           Vitest worker pool (e.g. 'vmThreads'). Empty keeps Vitest's default.
@@ -183,6 +191,10 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
+          # 'changed' scope diffs against the base commit, so the history has
+          # to be there. '0' is a non-empty string, so the expression below
+          # stays truthy — the numeric 0 would not.
+          fetch-depth: ${{ inputs.detect-secrets-scope == 'changed' && '0' || '1' }}
       - name: Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
@@ -215,7 +227,7 @@ jobs:
       # avoid PEP 668 "externally-managed-environment" errors on newer Ubuntu
       # images.
       - name: Set up Python (for detect-secrets)
-        if: ${{ hashFiles('.secrets.baseline') != '' }}
+        if: ${{ inputs.detect-secrets && hashFiles('.secrets.baseline') != '' }}
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.x'
@@ -233,7 +245,7 @@ jobs:
       # touching this key at all; pip simply adds the new version's wheels
       # to the same warmed cache on next miss).
       - name: Cache pip (detect-secrets)
-        if: ${{ hashFiles('.secrets.baseline') != '' }}
+        if: ${{ inputs.detect-secrets && hashFiles('.secrets.baseline') != '' }}
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/pip
@@ -242,9 +254,59 @@ jobs:
         if: ${{ inputs.detect-secrets && hashFiles('.secrets.baseline') != '' }}
         continue-on-error: ${{ !inputs.strict-checks }}
         working-directory: .
+        env:
+          SCOPE: ${{ inputs.detect-secrets-scope }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: |
           pip install --quiet detect-secrets==1.5.0
-          git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+          if [ "$SCOPE" != "changed" ]; then
+            git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline --
+            exit 0
+          fi
+          # 'changed' scope: only the files this push touched can have
+          # introduced a secret.
+          #
+          # detect-secrets matches a known secret by filename, hash and type
+          # -- not by line number. A secret that shifts lines is still
+          # recognised, and the hook rewrites the baseline's line number and
+          # exits 3 rather than reporting the secret as new. That is why a
+          # changed file whose baselined secret moved still fails the build
+          # until the baseline is refreshed.
+          base=""
+          for candidate in "$PR_BASE_SHA" "$MERGE_GROUP_BASE_SHA" "$PUSH_BEFORE_SHA"; do
+            if [ -n "$candidate" ] \
+              && [ "$candidate" != "0000000000000000000000000000000000000000" ] \
+              && git cat-file -e "${candidate}^{commit}" 2>/dev/null; then
+              base="$candidate"
+              break
+            fi
+          done
+          if [ -z "$base" ]; then
+            echo "::notice::No base commit available; scanning the whole tree."
+            git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline --
+            exit 0
+          fi
+          echo "Scanning the files changed since $base"
+          # The file list is NUL-delimited and unquoted. A path with
+          # whitespace in it must not be split into several arguments, and a
+          # path with non-ASCII characters must not be C-quoted -- either
+          # would make detect-secrets skip the file and report a clean
+          # scan. `--` ends the option list, so a filename that starts with
+          # a dash is a filename and not an option.
+          git -c core.quotepath=false diff --name-only -z --diff-filter=ACMR "$base" HEAD -- \
+            > /tmp/scanned-files.bin
+          # The files the baseline listed before this change, so removing a
+          # baseline entry for a file this push did not touch is still
+          # caught: the secret is found, and with no entry it is new.
+          git show "$base:.secrets.baseline" 2>/dev/null \
+            | jq -j '.results | keys[] | ., "\u0000"' >> /tmp/scanned-files.bin || true
+          if [ ! -s /tmp/scanned-files.bin ]; then
+            echo "No files to scan."
+            exit 0
+          fi
+          xargs -0 -a /tmp/scanned-files.bin detect-secrets-hook --baseline .secrets.baseline --
       # Detect scripts with `npm pkg get` (exact key lookup) instead of grepping
       # `npm run` output — the latter matched any script whose name OR body merely
       # contained "test"/"lint", and happily ran the `npm init` default
