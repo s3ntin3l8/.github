@@ -444,7 +444,21 @@ start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
 [[ $rc -eq 0 ]] && check "a failing reaction never fails the review" yes || { check "a failing reaction never fails the review" no; sed 's/^/        /' "$TMP/log.eyes" | tail -4; }
 grep -q "could not add the" "$TMP/log.eyes" && check "a failing reaction is reported as a warning" yes || check "a failing reaction is reported as a warning" no
 stop_fake
-unset FAKE_REACTION_FAIL REACTION_TOKEN EVENT_NAME COMMENT_ID ISSUE_NUMBER
+
+: > "$GH_LOG"; export EVENT_NAME=pull_request PR_NUMBER=42 FAKE_MARKER_RUN="run_dead"
+start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.eyes" 2>&1
+grep -q "^reaction to=.*repos/acme/widgets/issues/42/reactions.*content=eyes.* token=react-token" "$GH_LOG" \
+  && check "an auto-review on PR open reacts 👀 to the PR body" yes \
+  || { check "an auto-review on PR open reacts 👀 to the PR body" no; sed 's/^/        /' "$GH_LOG" | tail -4; }
+stop_fake
+
+: > "$GH_LOG"
+start_fake '{"run_status":"completed","replayed":true,"request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.eyes" 2>&1
+[[ $(reacted) -eq 0 ]] && check "a replayed auto-review does not react" yes || check "a replayed auto-review does not react" no
+stop_fake
+unset FAKE_REACTION_FAIL REACTION_TOKEN EVENT_NAME COMMENT_ID ISSUE_NUMBER PR_NUMBER
 
 echo
 echo "passed: $PASS   failed: $FAIL"
