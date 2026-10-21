@@ -33,6 +33,20 @@ on:
         required: false
         type: boolean
         default: false
+    # Optional. Both must be set to enable the two-invocation split documented on the
+    # `release` steps below; with either unset the workflow behaves exactly as before.
+    secrets:
+      RELEASE_APP_ID:
+        required: false
+        description: >-
+          Numeric ID of a dedicated GitHub App used to create the GitHub Release + tag.
+          Needs Contents, Pull requests and Workflows: read & write, installed on the
+          repo. Do not reuse the Hermes App: it carries elevated trust on a self-hosted
+          runner, and widening it to `workflows: write` would grow that blast radius for
+          an unrelated purpose.
+      RELEASE_APP_PRIVATE_KEY:
+        required: false
+        description: PEM private key of the release App.
     outputs:
       release_created:
         description: "Whether a release was created"
@@ -48,8 +62,9 @@ jobs:
       contents: write
       pull-requests: write
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
+      # Exactly one of the two release steps runs; the skipped one has empty outputs.
+      release_created: ${{ steps.release-app.outputs.release_created || steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release-app.outputs.tag_name || steps.release.outputs.tag_name }}
     steps:
       # Auto-heal a release PR wedged by the non-HEAD-tag failure documented
       # on skip-github-release above. release-please tracks its own state via
@@ -134,8 +149,78 @@ jobs:
             echo "PR #$number ($version): a release already exists for tag $tag and matches this PR's merge commit -- relabeling 'autorelease: pending' -> 'autorelease: tagged'."
             gh pr edit "$number" --remove-label "autorelease: pending" --add-label "autorelease: tagged"
           done
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+      # PREVENTION of the non-HEAD tag wedge (the auto-heal step above is only recovery).
+      # GITHUB_TOKEN can tag the default branch's HEAD but nothing else; tagging any
+      # other commit needs `workflows: write`, which GITHUB_TOKEN can never be granted.
+      # So if one run of a release-PR merge fails, every later run 403s on the same
+      # retry. Creating the release under a GitHub App that holds `workflows: write`
+      # removes the cliff. s3ntin3l8/.github#57.
+      #
+      # It is a TWO-invocation split, not a token swap: a single elevated token for both
+      # would make the release PR itself App-authored, which would newly fire Hermes
+      # auto-review (every consumer's bot-author exclusion list would need the App) and
+      # `pull_request` CI on every release PR. Splitting keeps the PR authored by
+      # github-actions[bot] exactly as today:
+      #   release-app: App token, skip-github-pull-request  -> tag + release + outputs
+      #   release-pr:  GITHUB_TOKEN, skip-github-release    -> the release PR
+      #
+      # Opt-in per repo: with neither secret set, the single `release` step below runs,
+      # byte-for-byte the previous behaviour.
+      #
+      # Note an App-created release DOES fire `on: release` / `on: push: tags`
+      # (a GITHUB_TOKEN-created one does not). Re-checked 2026-10-21 across every
+      # consumer of this workflow: none use either trigger and every `push` trigger is
+      # branch-filtered, so nothing newly fires. Re-check when enabling for a new repo.
+      - name: Detect release App
+        id: app
+        env:
+          HAS_APP_ID: ${{ secrets.RELEASE_APP_ID != '' }}
+          HAS_APP_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+        run: |
+          if [[ "$HAS_APP_ID" == "true" && "$HAS_APP_KEY" == "true" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            if [[ "$HAS_APP_ID" == "true" || "$HAS_APP_KEY" == "true" ]]; then
+              echo "::warning::Only one of RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY is set - ignoring both and releasing with GITHUB_TOKEN."
+            fi
+          fi
+
+      - name: Create release App token
+        id: app-token
+        if: steps.app.outputs.enabled == 'true'
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+
+      - name: Release Please (release only, as the App)
+        id: release-app
+        if: steps.app.outputs.enabled == 'true'
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: ${{ inputs.config-file }}
+          manifest-file: ${{ inputs.manifest-file }}
+          skip-github-pull-request: true
+          skip-github-release: ${{ inputs.skip-github-release }}
+
+      - name: Release Please (release PR only, as github-actions[bot])
+        id: release-pr
+        if: steps.app.outputs.enabled == 'true'
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          config-file: ${{ inputs.config-file }}
+          manifest-file: ${{ inputs.manifest-file }}
+          skip-github-release: true
+
+      - name: Release Please
         id: release
+        if: steps.app.outputs.enabled != 'true'
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           config-file: ${{ inputs.config-file }}
           manifest-file: ${{ inputs.manifest-file }}
