@@ -295,18 +295,30 @@ jobs:
           # would make detect-secrets skip the file and report a clean
           # scan. `--` ends the option list, so a filename that starts with
           # a dash is a filename and not an option.
+          # Per-job temp dir, not a fixed /tmp path: a self-hosted runner can host
+          # two jobs at once, and they must not clobber each other's list.
+          scan_list="$RUNNER_TEMP/scanned-files.bin"
           git -c core.quotepath=false diff --name-only -z --diff-filter=ACMR "$base" HEAD -- \
-            > /tmp/scanned-files.bin
+            > "$scan_list"
           # The files the baseline listed before this change, so removing a
           # baseline entry for a file this push did not touch is still
           # caught: the secret is found, and with no entry it is new.
-          git show "$base:.secrets.baseline" 2>/dev/null \
-            | jq -j '.results | keys[] | ., "\u0000"' >> /tmp/scanned-files.bin || true
-          if [ ! -s /tmp/scanned-files.bin ]; then
+          # A base with no baseline file has nothing to add. But if there IS one and
+          # it cannot be read, say so: dropping it silently would scan fewer files
+          # and still report a clean scan.
+          if git cat-file -e "$base:.secrets.baseline" 2>/dev/null; then
+            if ! command -v jq > /dev/null; then
+              echo "::error::jq is required to read the previous .secrets.baseline but is not installed on this runner."
+              exit 1
+            fi
+            git show "$base:.secrets.baseline" \
+              | jq -j '.results | keys[] | ., "\u0000"' >> "$scan_list"
+          fi
+          if [ ! -s "$scan_list" ]; then
             echo "No files to scan."
             exit 0
           fi
-          xargs -0 -a /tmp/scanned-files.bin detect-secrets-hook --baseline .secrets.baseline --
+          xargs -0 -a "$scan_list" detect-secrets-hook --baseline .secrets.baseline --
       # Detect scripts with `npm pkg get` (exact key lookup) instead of grepping
       # `npm run` output — the latter matched any script whose name OR body merely
       # contained "test"/"lint", and happily ran the `npm init` default
