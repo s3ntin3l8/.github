@@ -73,6 +73,15 @@ on:
       # NOT be passed this way — build args land in image history/logs regardless of
       # GitHub secret masking. Use repo variables for publishable tokens that are
       # inlined into the client bundle by design (e.g. NEXT_PUBLIC_*). Empty by default.
+      #
+      # The workflow always adds `COMMIT_SHA=<the commit it checked out>` (the release
+      # tag's commit for a release build), so do NOT pass `${{ github.sha }}` for a build
+      # stamp: that is the commit that triggered the caller, which differs from the built
+      # ref on a dispatch or a rebuild of an older tag. Declare `ARG COMMIT_SHA` where you
+      # consume it. A caller arg must be consumed somewhere that reaches the shipped image:
+      # the build FAILS if the final stage references `$X` without its own `ARG X` (the
+      # value would silently be empty), and warns if `X` appears nowhere in the Dockerfile.
+      # An arg consumed only in a builder stage (baked into a bundle) is fine.
       build-args:
         required: false
         type: string
@@ -184,6 +193,80 @@ jobs:
           ref: ${{ inputs.release-tag || github.ref }}
           persist-credentials: false
 
+      # Resolve the commit that was ACTUALLY checked out and hand it to the build as
+      # `COMMIT_SHA`. A caller that stamps `${{ github.sha }}` is only right when the
+      # built ref happens to be the commit that triggered the caller; a manual dispatch,
+      # or a rebuild of an older tag, makes the two differ (s3ntin3l8/.github#84).
+      #
+      # Also catches a caller build arg that can never reach the running app. `ARG X` is
+      # scoped to the stage that declares it, so a final stage that references `$X`
+      # without declaring `ARG X` there gets an empty string, with no error anywhere.
+      # The rule is deliberately NOT "declare it in the final stage": an arg consumed in
+      # a builder stage (e.g. `RUN GIT_SHA="$GIT_SHA" npm run build`) is baked into the
+      # shipped artifacts and is fine.
+      #   - fail:    referenced in the final stage, not declared there
+      #   - warn:    declared/referenced nowhere in the Dockerfile (a typo drops it)
+      #   - ignore:  anything else
+      # The Dockerfile comes from `inputs.dockerfile`, so a publisher building two
+      # images from one checkout is checked per image. Inputs go through env, not into
+      # the script text.
+      - name: Resolve built commit and validate build args
+        id: args
+        env:
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          CALLER_ARGS: ${{ inputs.build-args }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$DOCKERFILE" ]; then
+            echo "::error::Dockerfile '$DOCKERFILE' not found in the checkout"
+            exit 1
+          fi
+          sha=$(git rev-parse HEAD)
+
+          # Logical Dockerfile lines: comments dropped, `\` continuations joined.
+          logical=$(awk '
+            { sub(/^[ \t]+/, "") }
+            /^#/ { next }
+            { line = line $0 }
+            line ~ /\\[ \t]*$/ { sub(/\\[ \t]*$/, " ", line); next }
+            { if (line != "") print line; line = "" }
+            END { if (line != "") print line }
+          ' "$DOCKERFILE")
+          # The final stage is everything after the last FROM.
+          final=$(awk 'tolower($0) ~ /^from[ \t]/ { buf = ""; next } { buf = buf $0 "\n" } END { printf "%s", buf }' <<< "$logical")
+
+          failed=0
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            [ -z "$line" ] && continue
+            case "$line" in '#'*) continue ;; esac
+            key="${line%%=*}"
+            ref="\\$\\{?${key}([^A-Za-z0-9_]|\$)"
+            decl="(^|[[:space:]])${key}(=|[[:space:]]|\$)"
+            in_final_ref=false; in_final_decl=false; anywhere=false
+            grep -Eq "$ref" <<< "$final" && in_final_ref=true
+            grep -Ei '^ARG[[:space:]]' <<< "$final" | grep -Eq "$decl" && in_final_decl=true
+            if grep -Eq "$ref" <<< "$logical" || grep -Ei '^ARG[[:space:]]' <<< "$logical" | grep -Eq "$decl"; then
+              anywhere=true
+            fi
+            if [ "$in_final_ref" = true ] && [ "$in_final_decl" = false ]; then
+              echo "::error file=${DOCKERFILE}::build arg ${key} is referenced in the final stage of ${DOCKERFILE} but not declared there (add 'ARG ${key}' after the last FROM) - the substitution is empty and the image silently drops it"
+              failed=1
+            elif [ "$anywhere" = false ]; then
+              echo "::warning file=${DOCKERFILE}::build arg ${key} is not referenced anywhere in ${DOCKERFILE} - the value is silently dropped (typo?)"
+            fi
+          done <<< "$CALLER_ARGS"
+          [ "$failed" -eq 0 ] || exit 1
+
+          delim="EOF_$(openssl rand -hex 8)"
+          {
+            echo "sha=${sha}"
+            echo "build_args<<${delim}"
+            [ -n "$CALLER_ARGS" ] && printf '%s\n' "$CALLER_ARGS"
+            echo "COMMIT_SHA=${sha}"
+            echo "${delim}"
+          } >> "$GITHUB_OUTPUT"
+
       # Only needed for the fallback case (a non-amd64 platform pinned to an amd64 runner).
       # Native amd64/arm64 builds skip this entirely.
       - name: Set up QEMU
@@ -238,7 +321,7 @@ jobs:
         with:
           context: .
           file: ${{ inputs.dockerfile }}
-          build-args: ${{ inputs.build-args }}
+          build-args: ${{ steps.args.outputs.build_args }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           # Cache scope is `image-slug` + `arch-slug`. The image-slug dimension only
