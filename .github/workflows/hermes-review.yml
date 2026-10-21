@@ -686,7 +686,7 @@ jobs:
           if [[ "$USE_RUNS" == "true" ]]; then
             RESP=$(mktemp)
             if [[ "$TARGET_KIND" == "pr" && -n "$HEAD_SHA" ]]; then
-              IDEMPOTENCY_KEY="gha:$REPO#$TARGET_NUMBER@$BASE_SHA..$HEAD_SHA"
+              IDEMPOTENCY_KEY="hermes-review:$REPO#$TARGET_NUMBER@$BASE_SHA..$HEAD_SHA"
             else
               # An issue triage has no commit to pin; keep the per-run key so a triage
               # request is never replayed into a stale one.
