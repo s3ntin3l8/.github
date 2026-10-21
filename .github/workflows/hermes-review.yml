@@ -317,22 +317,6 @@ jobs:
             exit 1
           fi
 
-      - name: Create GitHub App token (runner-side, for trigger resolution)
-        id: app-token
-        if: steps.preflight.outputs.skip != 'true'
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
-        with:
-          app-id: ${{ secrets.HERMES_APP_ID }}
-          private-key: ${{ secrets.HERMES_APP_PRIVATE_KEY }}
-          # Least privilege: this token is only used by the re-trigger guard, which
-          # reads reviews (pulls/N/reviews) and comments (issues/N/comments), and by
-          # the review-scope/in-flight steps, which read the PR head and the bot's
-          # last review and write the "review in flight" check run. The agent mints
-          # its own full token via scripts/app-token.sh.
-          permission-pull-requests: read
-          permission-issues: read
-          permission-checks: write
-
       # Early exit unless the comment actually contains the configured mention.
       # ONLY enforced in on-demand mode. In auto mode the caller's `on:` decides when
       # to run (e.g. pull_request opened), so we never skip on mention — but we still
@@ -393,6 +377,26 @@ jobs:
             exit 0   # not a failure: leave the run green
           fi
           echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub App token (runner-side, for trigger resolution)
+        id: app-token
+        # After `Check mention` on purpose: a comment that does not address the bot (or a
+        # dependabot run without secrets) skips here, before any secret is used or a token
+        # is minted on the self-hosted runner. `Check mention` already folds the
+        # preflight result into its `skip` output.
+        if: steps.check-mention.outputs.skip != 'true'
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.HERMES_APP_ID }}
+          private-key: ${{ secrets.HERMES_APP_PRIVATE_KEY }}
+          # Least privilege: this token is only used by the re-trigger guard, which
+          # reads reviews (pulls/N/reviews) and comments (issues/N/comments), and by
+          # the review-scope/in-flight steps, which read the PR head and the bot's
+          # last review and write the "review in flight" check run. The agent mints
+          # its own full token via scripts/app-token.sh.
+          permission-pull-requests: read
+          permission-issues: read
+          permission-checks: write
 
       # Resolve WHAT was mentioned, so we can route to the right prompt and tell the
       # agent which PR/issue to act on. Uses the runner-side App token (read-only view).
