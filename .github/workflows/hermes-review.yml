@@ -695,15 +695,18 @@ jobs:
           BASE_SHA: ${{ steps.scope.outputs.base }}
           LEDGER: ${{ inputs.hermes-review-ledger }}
           LEDGER_NAME: ${{ inputs.hermes-review-ledger-name }}
+          BOT_LOGIN: ${{ inputs.mention-trigger }}[bot]
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           [ -f "$PROMPT_FILE" ] || { echo "::error::prompt not found: $PROMPT_FILE"; exit 1; }
+          # Response files live in the per-job temp dir (a self-hosted runner can host two
+          # jobs) and are removed when the step ends, however it ends.
+          trap 'rm -f "${RESP:-}" "${LEGACY_RESP:-}"' EXIT
 
           # Assemble the user message from exported env vars. We do NOT rely on a
           # shell-local MSG var — it would not be exported to a child process.
           # Use printf to build the header with real newlines (YAML-safe).
-          HEADER=$(printf 'Target: %s #%s in repo %s\nUse the github-code-review skill (for a PR) or your triage procedure (for an issue) to act on it. The GitHub App token is available to you via scripts/app-token.sh in the review-bot profile; mint it before calling gh. Do NOT ask the human for secrets.\n' "$TARGET_KIND" "$TARGET_NUMBER" "$REPO")
           # One session per pull request, so every round of the same PR continues the
           # same conversation (the reviewer remembers what it said last round) while
           # DIFFERENT PRs stay independent and can be reviewed in parallel. The id is
@@ -735,18 +738,51 @@ jobs:
             REPO_SLUG=$(printf '%s' "$REPO_SLUG" | tr '[:upper:]' '[:lower:]')
             SESSION_ID="hermes-review-${OWNER_SLUG}-${REPO_SLUG}-$TARGET_NUMBER"
           fi
-          if [[ -n "$HEAD_SHA" ]]; then
-            HEADER+=$(printf '\nReview the pull request at commit %s — that exact commit. If the PR head has moved since this request, say so in the review instead of reviewing a newer head.\n' "$HEAD_SHA")
-          fi
-          if [[ -n "$BASE_SHA" ]]; then
-            HEADER+=$(printf '\nThis is a FOLLOW-UP round. The previous round reviewed up to %s. Review ONLY what changed since then: the range %s..%s (git diff %s..%s). Earlier rounds are in the history of this session: do not re-review them, but DO flag anything in the new range that interacts with what was found before, and state whether the previous round findings are addressed. If %s is not an ancestor of %s (the PR was rebased), review the whole PR instead.\n' "$BASE_SHA" "$BASE_SHA" "$HEAD_SHA" "$BASE_SHA" "$HEAD_SHA" "$BASE_SHA" "$HEAD_SHA")
-          fi
-          if [[ -n "$MODEL" ]]; then
-            HEADER+=$(printf '\nPrefer model: %s\n' "$MODEL")
-          fi
-          HEADER+=$(printf '\nHonor a maximum of %s agent turns.\n\n' "$MAX_TURNS")
+          # The message is built by a function because a retry in a FRESH session (see the
+          # admission_conflict arm below) must not claim that earlier rounds are in the
+          # session's history: they are not, and the reviewer has to read them off the PR.
+          build_msg() { # FRESH_SESSION=1: the session has no memory of earlier rounds
+            HEADER=$(printf 'Target: %s #%s in repo %s\nUse the github-code-review skill (for a PR) or your triage procedure (for an issue) to act on it. The GitHub App token is available to you via scripts/app-token.sh in the review-bot profile; mint it before calling gh. Do NOT ask the human for secrets.\n' "$TARGET_KIND" "$TARGET_NUMBER" "$REPO")
+            if [[ -n "$HEAD_SHA" ]]; then
+              HEADER+=$(printf '\nReview the pull request at commit %s — that exact commit. If the PR head has moved since this request, say so in the review instead of reviewing a newer head.\n' "$HEAD_SHA")
+            fi
+            if [[ -n "$BASE_SHA" ]]; then
+              if [[ -n "${FRESH_SESSION:-}" ]]; then
+                HISTORY_NOTE='This is a NEW session: earlier rounds are NOT in your history. Read the pull request'"'"'s existing reviews and comments (gh) for what was found before. Do not re-review them, but DO flag anything in the new range that interacts with those findings, and state whether they are addressed.'
+              else
+                HISTORY_NOTE='Earlier rounds are in the history of this session: do not re-review them, but DO flag anything in the new range that interacts with what was found before, and state whether the previous round findings are addressed.'
+              fi
+              HEADER+=$(printf '\nThis is a FOLLOW-UP round. The previous round reviewed up to %s. Review ONLY what changed since then: the range %s..%s (git diff %s..%s). %s If %s is not an ancestor of %s (the PR was rebased), review the whole PR instead.\n' "$BASE_SHA" "$BASE_SHA" "$HEAD_SHA" "$BASE_SHA" "$HEAD_SHA" "$HISTORY_NOTE" "$BASE_SHA" "$HEAD_SHA")
+            fi
+            if [[ -n "$MODEL" ]]; then
+              HEADER+=$(printf '\nPrefer model: %s\n' "$MODEL")
+            fi
+            HEADER+=$(printf '\nHonor a maximum of %s agent turns.\n\n' "$MAX_TURNS")
+            MSG="$HEADER$(cat "$PROMPT_FILE")"
+          }
 
-          MSG="$HEADER$(cat "$PROMPT_FILE")"
+          # ── Session memory ───────────────────────────────────────────────────────────
+          # A round that had to move to a fresh session (below) leaves that session id in
+          # its in-flight marker; the next round starts from it instead of from the stuck
+          # base id, so a PR keeps one live session instead of paying a refused POST every
+          # round and losing the history again. The marker is read off the PREVIOUS round's
+          # commit. Only an id of the exact shape we generate is accepted.
+          BASE_SESSION_ID="$SESSION_ID"
+          SESSION_ATTEMPT=1
+          if [[ "$TARGET_KIND" == "pr" && -n "$BASE_SHA" && "$LEDGER" == "check-run" ]]; then
+            set +e
+            REMEMBERED=$(gh api "repos/$REPO/commits/$BASE_SHA/check-runs" \
+              --jq '[.check_runs[] | select(.name == env.LEDGER_NAME)] | last | .output.summary // empty' 2>/dev/null \
+              | sed -n 's/^session: //p' | head -1)
+            set -e
+            if [[ -n "$REMEMBERED" && "$REMEMBERED" =~ ^${BASE_SESSION_ID}(-[0-9]+)?$ ]]; then
+              SESSION_ID="$REMEMBERED"
+              if [[ -n "${BASH_REMATCH[1]}" ]]; then SESSION_ATTEMPT="${BASH_REMATCH[1]#-}"; fi
+              echo "::notice::continuing in session $SESSION_ID (remembered from the previous round)."
+            fi
+          fi
+          FRESH_SESSION=""
+          build_msg
 
           # ── Runs API path (opt-in via hermes-use-runs) ───────────────────────────────
           # POST /v1/runs answers 202 + run_id as soon as the run is admitted, so unlike the
@@ -761,7 +797,7 @@ jobs:
           # pure function of the key, because Hermes fingerprints the request body: a
           # different body under the same key is a 409 conflict, not a replay.
           if [[ "$USE_RUNS" == "true" ]]; then
-            RESP=$(mktemp)
+            RESP=$(mktemp "${RUNNER_TEMP:-/tmp}/hermes-resp.XXXXXX")
             if [[ "$TARGET_KIND" == "pr" && -n "$HEAD_SHA" ]]; then
               # Lower-cased for the same reason as the session id: the relay
               # lower-cases, and a key that depends on the case of the remote
@@ -778,7 +814,6 @@ jobs:
             # The dispatch is a loop: a 409 whose run has died is retried
             # under a deeper key (see the 409 arm below), and a fresh attempt
             # is a fresh key — never the same one twice.
-            SESSION_ATTEMPT=1
             for ATTEMPT in 1 2 3; do
             set +e
             HTTP_CODE=$(curl -sS -m 30 -o "$RESP" -w '%{http_code}' \
@@ -857,8 +892,10 @@ jobs:
                 fi
                 SESSION_ATTEMPT=$(( SESSION_ATTEMPT + 1 ))
                 echo "::notice::Hermes' session authority refused the turn for session '$SESSION_ID' (HTTP 409: admission_conflict) — that session is stuck and refuses every later round of this pull request; retrying in a fresh one."
-                SESSION_ID="${SESSION_ID}-${SESSION_ATTEMPT}"
+                SESSION_ID="${BASE_SESSION_ID}-${SESSION_ATTEMPT}"
                 IDEMPOTENCY_KEY="${IDEMPOTENCY_KEY}#session-${SESSION_ATTEMPT}"
+                FRESH_SESSION=1
+                build_msg
                 RUN_BODY=$(jq -nc --arg model "$API_MODEL" --arg input "$MSG" --arg session "$SESSION_ID" \
                   '{model:$model,input:$input} + (if $session == "" then {} else {session_id:$session} end)')
                 continue
@@ -867,8 +904,8 @@ jobs:
                 # No marker names the run the key holds, so we cannot say whether
                 # it is still working — and it is the KEY that conflicts here, so
                 # there is nothing else to try.
-                echo "::warning::Hermes holds a run for this range but no ledger marker names it, so whether it is still running is unknown — this green check does not mean a review is in progress."
-                exit 0
+                echo "::error::Hermes holds a run for this range (HTTP 409: $CONFLICT_CODE) but no ledger marker names it, so whether it is still running is unknown — review NOT dispatched. Check the run on hermes-01 before asking again."
+                exit 1
               fi
               case "$EXISTING_STATUS" in
                 queued|running|stopping|pending|started|waiting_for_approval)
@@ -877,6 +914,17 @@ jobs:
                   exit 0
                   ;;
                 completed|failed|cancelled|interrupted)
+                  if [[ "$EXISTING_STATUS" == "completed" && "$TARGET_KIND" == "pr" && -n "$HEAD_SHA" ]]; then
+                    # It finished. If Hermes' own review of THIS head landed, there is nothing
+                    # to redo: a deeper key would dispatch a second review of the same commit
+                    # (the same rule the scope step applies before dispatching).
+                    LANDED=$(gh api "repos/$REPO/pulls/$TARGET_NUMBER/reviews" \
+                      --jq '[.[] | select(.user.login == env.BOT_LOGIN and .commit_id == env.HEAD_SHA and (.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED"))] | length' 2>/dev/null || echo 0)
+                    if [[ "${LANDED:-0}" != "0" ]]; then
+                      echo "::notice::the run Hermes held for this range completed and its review of $HEAD_SHA already landed — not dispatching another."
+                      exit 0
+                    fi
+                  fi
                   # The attempt is over. Retry under a deeper key, derived from the
                   # run that died — the key is a function of what failed, not of the
                   # clock, so a repeat of the retry replays it instead of dispatching
@@ -889,8 +937,8 @@ jobs:
                   # The status lookup failed (API unreachable, run unknown, bad
                   # JSON): we do NOT know whether the run ended, so don't claim it
                   # and don't dispatch a second review of the same range.
-                  echo "::warning::Hermes holds run $MARKER_RUN for this range, but its status could not be read (the lookup returned nothing) — it may still be running. Check the run on hermes-01 before asking again."
-                  exit 0
+                  echo "::error::Hermes holds run $MARKER_RUN for this range (HTTP 409: $CONFLICT_CODE), but its status could not be read (the lookup returned nothing) — review NOT dispatched. Check the run on hermes-01 before asking again."
+                  exit 1
                   ;;
               esac
             fi
@@ -928,6 +976,7 @@ jobs:
               CHECK_RUN_ID=$(gh api --method POST "repos/$REPO/check-runs" \
                 -f name="$LEDGER_NAME" -f head_sha="$HEAD_SHA" -f external_id="$RUN_ID" \
                 -f status=in_progress \
+                -f "output[title]=$LEDGER_NAME" -f "output[summary]=session: $SESSION_ID" \
                 -f details_url="https://github.com/$REPO/pull/$TARGET_NUMBER" \
                 --jq '.id' 2>/dev/null)
               set -e
@@ -1020,7 +1069,7 @@ jobs:
             SESSION_HEADER=(-H "X-Hermes-Session-Id: $SESSION_ID")
           fi
           set +e
-          LEGACY_RESP=$(mktemp)
+          LEGACY_RESP=$(mktemp "${RUNNER_TEMP:-/tmp}/hermes-legacy.XXXXXX")
           HTTP_CODE=$(curl -sS -m 20 -o "$LEGACY_RESP" -w '%{http_code}' \
             -X POST "$API_URL/v1/chat/completions" \
             -H "Authorization: Bearer $API_KEY" \
