@@ -94,7 +94,7 @@ case "$joined" in
     log "graphql repo=$repo"
     cat "${FAKE_MARKER_FILE:-/nonexistent}" 2>/dev/null || echo ""
     exit 0 ;;
-  *"--method POST"*"check-runs"*) log "check-run created"; echo "${FAKE_CHECK_RUN_ID:-4242}"; exit 0 ;;
+  *"--method POST"*"check-runs"*) log "check-run created ${args[*]}"; echo "${FAKE_CHECK_RUN_ID:-4242}"; exit 0 ;;
   *"--method PATCH"*"check-runs"*) log "check-run patched"; exit 0 ;;
   *"/check-runs"*)
     # The check runs already on a commit — the in-flight marker. The step
@@ -102,7 +102,7 @@ case "$joined" in
     # (This case must come AFTER the POST and PATCH cases: they match the
     # same path, and a marker listing would answer them with the wrong shape.)
     log "check-runs"
-    runs='{"total_count":1,"check_runs":[{"name":"'"${LEDGER_NAME:-Hermes review}"'","external_id":"'"${FAKE_MARKER_RUN:-run_dead}"'"}]}'
+    runs='{"total_count":1,"check_runs":[{"name":"'"${LEDGER_NAME:-Hermes review}"'","external_id":"'"${FAKE_MARKER_RUN-run_dead}"'","output":{"summary":"'"${FAKE_MARKER_SESSION:+session: $FAKE_MARKER_SESSION}"'"}}]}'
     filter=""
     prev=""
     for a in "${args[@]}"; do
@@ -237,8 +237,6 @@ stop_fake
 
 echo "== a 409 whose run died is retried under a deeper key =="
 export FAKE_MARKER_RUN="run_dead"
-start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,202],"request_log":"'"$TMP"'/requests.log"}'
-( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.409" 2>&1
 : > "$TMP/requests.log"
 start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,202],"request_log":"'"$TMP"'/requests.log"}'
 ( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.409" 2>&1
@@ -304,6 +302,95 @@ grep -q "NOT dispatched" "$TMP/log.legacy409" \
   || check "the legacy path exits non-zero on HTTP 409" no
 stop_fake
 export USE_RUNS="true"
+
+echo "== follow-ups to the refusal handling =="
+export BASE_SHA="old999" FAKE_MARKER_RUN="run_dead"
+
+# (1) a fresh session must not be told that earlier rounds are in its history
+: > "$TMP/requests.log"
+start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,202],"conflict_code":"admission_conflict","run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.fresh" 2>&1
+[[ $(grep -c "Earlier rounds are in the history of this session" "$TMP/requests.log") -eq 1 ]] \
+  && check "the first attempt tells the reviewer earlier rounds are in its session" yes \
+  || check "the first attempt tells the reviewer earlier rounds are in its session" no
+[[ $(grep -c "This is a NEW session: earlier rounds are NOT in your history" "$TMP/requests.log") -eq 1 ]] \
+  && check "the retry in a fresh session says it has no history" yes \
+  || { check "the retry in a fresh session says it has no history" no; sed 's/^/        /' "$TMP/log.fresh" | tail -5; }
+stop_fake
+
+# (2) the session a round moved to is remembered by the next one
+: > "$TMP/requests.log"; : > "$GH_LOG"
+export FAKE_MARKER_SESSION="hermes-review-acme-widgets-42-2"
+start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.remember" 2>&1
+grep -q '"session_id": "hermes-review-acme-widgets-42-2"' "$TMP/requests.log" \
+  && check "the next round starts in the session the previous round moved to" yes \
+  || { check "the next round starts in the session the previous round moved to" no; sed 's/^/        /' "$TMP/requests.log" | cut -c1-200 | head -3; }
+grep -q "output\[summary\]=session: hermes-review-acme-widgets-42-2" "$GH_LOG" \
+  && check "the in-flight marker records the session it ran in" yes \
+  || { check "the in-flight marker records the session it ran in" no; tail -3 "$GH_LOG"; }
+stop_fake
+export FAKE_MARKER_SESSION="evil/../x"
+: > "$TMP/requests.log"
+start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.remember" 2>&1
+grep -q '"session_id": "hermes-review-acme-widgets-42"' "$TMP/requests.log" \
+  && check "a remembered session id of the wrong shape is ignored" yes \
+  || check "a remembered session id of the wrong shape is ignored" no
+stop_fake
+export FAKE_MARKER_SESSION="hermes-review-other-repo-9"
+: > "$TMP/requests.log"
+start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.remember" 2>&1
+grep -q '"session_id": "hermes-review-acme-widgets-42"' "$TMP/requests.log" \
+  && check "a remembered session of another pull request is ignored" yes \
+  || check "a remembered session of another pull request is ignored" no
+stop_fake
+unset FAKE_MARKER_SESSION
+
+# (3) a 409 nothing can explain is a failure, not a green "unknown"
+export FAKE_MARKER_RUN=""
+start_fake '{"dispatch_codes":[409],"request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.nomarker" 2>&1; rc=$?
+[[ $rc -ne 0 ]] && grep -q "NOT dispatched" "$TMP/log.nomarker" \
+  && check "a 409 with no marker naming the run fails (not a green unknown)" yes \
+  || check "a 409 with no marker naming the run fails (not a green unknown)" no
+stop_fake
+export FAKE_MARKER_RUN="unknown-run"
+start_fake '{"dispatch_codes":[409],"request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.nostatus" 2>&1; rc=$?
+[[ $rc -ne 0 ]] && grep -q "NOT dispatched" "$TMP/log.nostatus" \
+  && check "a 409 whose run status cannot be read fails" yes \
+  || check "a 409 whose run status cannot be read fails" no
+stop_fake
+
+# (4) a completed run whose review already landed at this head is not redone
+export FAKE_MARKER_RUN="run_done" FAKE_LAST_REVIEWED="head111"
+: > "$TMP/requests.log"
+start_fake '{"run_statuses":{"run_done":"completed"},"dispatch_codes":[409,202],"request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.landed" 2>&1; rc=$?
+[[ $rc -eq 0 && $(grep -c '"method": "POST"' "$TMP/requests.log") -eq 1 ]] && grep -q "already landed" "$TMP/log.landed" \
+  && check "a completed run whose review landed at this head is not redispatched" yes \
+  || { check "a completed run whose review landed at this head is not redispatched" no; sed 's/^/        /' "$TMP/log.landed" | tail -4; }
+stop_fake
+export FAKE_LAST_REVIEWED="old999"
+: > "$TMP/requests.log"
+start_fake '{"run_statuses":{"run_done":"completed"},"dispatch_codes":[409,202],"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.notlanded" 2>&1
+[[ $(grep -c '"method": "POST"' "$TMP/requests.log") -eq 2 ]] \
+  && check "a completed run with no review at this head is retried under a deeper key" yes \
+  || check "a completed run with no review at this head is retried under a deeper key" no
+stop_fake
+
+# (5) response files do not outlive the step
+export FAKE_LAST_REVIEWED="" FAKE_MARKER_RUN="run_dead"
+mkdir -p "$TMP/rt"; export RUNNER_TEMP="$TMP/rt"
+start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.tmpfiles" 2>&1
+[[ -z "$(ls -A "$TMP/rt")" ]] && check "the step leaves no response files in RUNNER_TEMP" yes || { check "the step leaves no response files in RUNNER_TEMP" no; ls "$TMP/rt"; }
+stop_fake
+unset RUNNER_TEMP
+export BASE_SHA=""
 
 echo
 echo "passed: $PASS   failed: $FAIL"
