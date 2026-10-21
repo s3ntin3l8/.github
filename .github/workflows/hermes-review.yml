@@ -173,6 +173,41 @@ on:
         type: string
         default: hermes-triage-prompt.md
         description: Path (relative to the shared/workflow repo root) of the issue triage recipe.
+      hermes-use-runs:
+        required: false
+        type: boolean
+        default: false
+        description: >-
+          Dispatch through Hermes' Runs API (POST /v1/runs) and poll the run to completion,
+          failing the check if it ends failed/interrupted and writing the bot's reply to the
+          job summary. Default false keeps the legacy fire-and-forget POST to
+          /v1/chat/completions, which cannot tell a long healthy run from a silent failure.
+          The polling job holds its runner for the length of the review, so give the repo a
+          second self-hosted runner before opting in.
+      hermes-review-scope:
+        required: false
+        type: string
+        default: delta
+        description: >-
+          What a follow-up review round covers. "delta" (default) reviews only the commits
+          since the bot's last landed review, so a round is small, fast and focused on what
+          actually changed; "full" re-reviews the whole pull request every time.
+      hermes-review-ledger:
+        required: false
+        type: string
+        default: check-run
+        description: >-
+          Where the "a review is already in flight for this PR" marker lives. "check-run"
+          (default) writes a check run on the reviewed head whose external_id is the Hermes
+          run id, so a later request can find the live run, wait for it, or stop it when the
+          head moved on. "off" disables the marker (every request dispatches).
+      hermes-review-ledger-name:
+        required: false
+        type: string
+        default: Hermes review
+        description: >-
+          The check-run name the in-flight marker uses. Renaming it orphans existing
+          markers: a request would no longer see a review that started under the old name.
 
 jobs:
   hermes-review:
@@ -238,10 +273,13 @@ jobs:
           app-id: ${{ secrets.HERMES_APP_ID }}
           private-key: ${{ secrets.HERMES_APP_PRIVATE_KEY }}
           # Least privilege: this token is only used by the re-trigger guard, which
-          # reads reviews (pulls/N/reviews) and comments (issues/N/comments). The agent
-          # mints its own full token via scripts/app-token.sh.
+          # reads reviews (pulls/N/reviews) and comments (issues/N/comments), and by
+          # the review-scope/in-flight steps, which read the PR head and the bot's
+          # last review and write the "review in flight" check run. The agent mints
+          # its own full token via scripts/app-token.sh.
           permission-pull-requests: read
           permission-issues: read
+          permission-checks: write
 
       # Early exit unless the comment actually contains the configured mention.
       # ONLY enforced in on-demand mode. In auto mode the caller's `on:` decides when
@@ -369,12 +407,167 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Resolve WHAT a review round should cover, and whether the head has already
+      # been reviewed.
+      #
+      # The bot's LAST LANDED review pins the commit it covered; that commit is the
+      # base of the next round's delta. Two things fall out of that:
+      #
+      #   * If the bot's last review is already on the CURRENT head, nothing changed
+      #     since it reviewed, so there is nothing to do -> skip. This is what stops a
+      #     storm of "@s3ntin3l8-hermes Review" comments on an unchanged PR from
+      #     dispatching a review each time (observed live: 11 mentions on one PR, 21
+      #     queued review turns in one Hermes session).
+      #   * Otherwise the delta is (last reviewed commit)..(current head), so a follow-up
+      #     round reads only what changed instead of the whole diff again.
+      #
+      # Only a PR has a commit to pin; an issue triage (and a caller that asked for
+      # "full" scope) has no head, no delta and no "already reviewed" skip.
+      #
+      # IMPORTANT: this step sets a `skip` output, like `check-mention` and `guard`
+      # above; the downstream steps gate on it.
+      - name: Resolve review scope (head, delta base, already reviewed?)
+        id: scope
+        if: steps.check-mention.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          KIND: ${{ steps.target.outputs.kind }}
+          NUMBER: ${{ steps.target.outputs.number }}
+          BOT_LOGIN: ${{ inputs.mention-trigger }}[bot]
+          SCOPE_MODE: ${{ inputs.hermes-review-scope }}
+        run: |
+          set -euo pipefail
+          {
+            echo "skip=false"
+            echo "head="
+            echo "base="
+          } >> "$GITHUB_OUTPUT"
+          if [[ "$KIND" != "pr" || "$SCOPE_MODE" != "delta" ]]; then
+            exit 0
+          fi
+          HEAD_SHA=$(gh api "repos/$REPO/pulls/$NUMBER" --jq '.head.sha')
+          if [[ -z "$HEAD_SHA" ]]; then
+            echo "::error::Could not read the head commit of $REPO#$NUMBER — review NOT dispatched."
+            exit 1
+          fi
+          # jq's `env` object reads BOT_LOGIN from this step's own env: block, so the
+          # bot login needs no --arg interpolation (the same shape the re-trigger guard
+          # above uses; `gh api --jq` takes exactly one argument and rejects jq's own
+          # --arg).
+          LAST_REVIEWED=$(gh api "repos/$REPO/pulls/$NUMBER/reviews" \
+            --jq '[.[] | select(.user.login == env.BOT_LOGIN and .state != "DISMISSED") | .commit_id] | last // empty')
+          echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          if [[ -n "$LAST_REVIEWED" && "$LAST_REVIEWED" == "$HEAD_SHA" ]]; then
+            echo "::notice::$BOT_LOGIN already reviewed $REPO#$NUMBER at $HEAD_SHA — the head has not moved since; skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "base=$LAST_REVIEWED" >> "$GITHUB_OUTPUT"
+          if [[ -n "$LAST_REVIEWED" ]]; then
+            echo "::notice::follow-up round: reviewing only $LAST_REVIEWED..$HEAD_SHA (the last landed review covered $LAST_REVIEWED)."
+          else
+            echo "::notice::first round for this PR: reviewing the whole diff at $HEAD_SHA."
+          fi
+
+      # Is a review of this PR already in flight?
+      #
+      # The ledger is a check run on the reviewed head whose external_id is the Hermes
+      # run id, so the live run can be found, asked for its status, and stopped. Without
+      # it, every request while a review is running queues ANOTHER review behind it in
+      # the PR's Hermes session: the reviewer then works through a backlog of rounds,
+      # each one slower than the last (every round inherits the previous rounds'
+      # transcript), and the queue is what eventually trips Hermes' concurrent-run cap
+      # (HTTP 429) — which used to be reported as a successful relay.
+      #
+      # Two outcomes, both of which avoid the queue:
+      #   * the marker is on the CURRENT head -> a review of this exact head is already
+      #     running -> skip and let it finish;
+      #   * the marker is on an OLDER head -> the head moved while that review was
+      #     running, so that review is about to be stale -> stop it and review the new
+      #     head instead of queueing behind it.
+      #
+      # Only a PR has a head to hang the marker on, and the marker needs a run id, so
+      # this runs on the Runs API path only.
+      - name: Check for an in-flight review (ledger)
+        id: inflight
+        if: steps.check-mention.outputs.skip != 'true' && steps.guard.outputs.skip != 'true' && steps.scope.outputs.skip != 'true'
+        env:
+          API_URL: ${{ inputs.hermes-api-url }}
+          API_KEY: ${{ secrets.HERMES_API_KEY }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          NUMBER: ${{ steps.target.outputs.number }}
+          KIND: ${{ steps.target.outputs.kind }}
+          HEAD_SHA: ${{ steps.scope.outputs.head }}
+          USE_RUNS: ${{ inputs.hermes-use-runs }}
+          LEDGER: ${{ inputs.hermes-review-ledger }}
+          LEDGER_NAME: ${{ inputs.hermes-review-ledger-name }}
+        run: |
+          set -euo pipefail
+          {
+            echo "skip=false"
+            echo "action=dispatch"
+            echo "stale_run="
+          } >> "$GITHUB_OUTPUT"
+          if [[ "$USE_RUNS" != "true" || "$KIND" != "pr" || "$LEDGER" != "check-run" || -z "$HEAD_SHA" ]]; then
+            exit 0
+          fi
+          # The newest "Hermes review" check run on the PR's recent commits. The PR's
+          # last commits, not just the head: a marker left on an older head IS the
+          # "the head moved while a review was running" signal.
+          QUERY=$(cat <<'GQL'
+          query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){commits(last:5){nodes{commit{oid checkSuites(first:20){nodes{checkRuns(first:20){nodes{name externalId status conclusion}}}}}}}}}}
+          GQL
+          )
+          MARKER=$(gh api graphql \
+            -f query="$QUERY" \
+            -F owner="$OWNER" -F repo="$REPO" -F number="$NUMBER" \
+            --jq '[.data.repository.pullRequest.commits.nodes[] | {oid: .commit.oid, runs: [.commit.checkSuites.nodes[].checkRuns.nodes[] | select(.name == env.LEDGER_NAME and .externalId != null and .externalId != "")]} | select(.runs | length > 0) | {oid: .oid, run: .runs[0].externalId}] | first // empty')
+          if [[ -z "$MARKER" ]]; then
+            exit 0
+          fi
+          MARKER_SHA=$(jq -r '.oid // empty' <<< "$MARKER")
+          MARKER_RUN=$(jq -r '.run // empty' <<< "$MARKER")
+          echo "::notice::found an in-flight marker on ${MARKER_SHA:-an older head} (Hermes run $MARKER_RUN)."
+          # Ask Hermes whether that run is still alive. A run that is gone (expired,
+          # or its window elapsed) is not in flight.
+          set +e
+          STATUS=$(curl -sS -m 10 "$API_URL/v1/runs/$MARKER_RUN" \
+            -H "Authorization: Bearer $API_KEY" | jq -r '.status // empty')
+          set -e
+          case "$STATUS" in
+            queued|running|stopping|pending|started)
+              # Still live: the marker points at a run that is still working.
+              if [[ "$MARKER_SHA" == "$HEAD_SHA" ]]; then
+                echo "::notice::a review of $REPO#$NUMBER at $HEAD_SHA is already running (Hermes run $MARKER_RUN) — not queueing another one."
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "::notice::the head moved while run $MARKER_RUN was reviewing ${MARKER_SHA:-an older head} — stopping it instead of queueing behind it."
+              set +e
+              curl -sS -m 15 -X POST "$API_URL/v1/runs/$MARKER_RUN/stop" \
+                -H "Authorization: Bearer $API_KEY" -o /dev/null
+              set -e
+              echo "stale_run=$MARKER_RUN" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              # Terminal (completed/failed/cancelled/interrupted), a status this
+              # workflow does not know, or an empty answer (Hermes does not know the
+              # run any more): the marker is stale, so a fresh round is dispatched. An
+              # unreadable answer is treated as stale rather than in flight — blocking
+              # on it would silently drop reviews, and the idempotency key still keeps
+              # a repeat request from queuing a second run of the same range.
+              ;;
+          esac
+
       # Checkout THIS shared repo to fetch the prompt(s) (read-only, no token needed).
       # NOTE: sparse-checkout defaults to cone mode, which only accepts DIRECTORY
       # patterns — bare filenames like "hermes-review-prompt.md" are rejected
       # ("not a directory"). Disable cone mode so file paths work.
       - name: Checkout shared repo (prompt source)
-        if: steps.check-mention.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
+        if: steps.check-mention.outputs.skip != 'true' && steps.guard.outputs.skip != 'true' && steps.scope.outputs.skip != 'true' && steps.inflight.outputs.skip != 'true'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: s3ntin3l8/.github
@@ -393,7 +586,7 @@ jobs:
       # This is what makes the relay step's "000 = normal" assumption below safe: by the
       # time we reach it, we already know the server was reachable moments earlier.
       - name: Check Hermes API reachability
-        if: steps.check-mention.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
+        if: steps.check-mention.outputs.skip != 'true' && steps.guard.outputs.skip != 'true' && steps.scope.outputs.skip != 'true' && steps.inflight.outputs.skip != 'true'
         env:
           API_URL: ${{ inputs.hermes-api-url }}
         run: |
@@ -424,7 +617,7 @@ jobs:
       # accepted-and-running.
       - name: Run Hermes (remote agent on hermes-01)
         id: run
-        if: steps.check-mention.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
+        if: steps.check-mention.outputs.skip != 'true' && steps.guard.outputs.skip != 'true' && steps.scope.outputs.skip != 'true' && steps.inflight.outputs.skip != 'true'
         env:
           API_URL: ${{ inputs.hermes-api-url }}
           API_KEY: ${{ secrets.HERMES_API_KEY }}
@@ -432,9 +625,16 @@ jobs:
           TARGET_KIND: ${{ steps.target.outputs.kind }}
           TARGET_NUMBER: ${{ steps.target.outputs.number }}
           REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
           MODEL: ${{ inputs.hermes-model || vars.HERMES_MODEL || '' }}
           PROMPT_FILE: .hermes-shared/${{ steps.target.outputs.kind == 'pr' && inputs.prompt-path || inputs.issue-prompt-path }}
           MAX_TURNS: ${{ inputs.max-turns }}
+          USE_RUNS: ${{ inputs.hermes-use-runs }}
+          HEAD_SHA: ${{ steps.scope.outputs.head }}
+          BASE_SHA: ${{ steps.scope.outputs.base }}
+          LEDGER: ${{ inputs.hermes-review-ledger }}
+          LEDGER_NAME: ${{ inputs.hermes-review-ledger-name }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           [ -f "$PROMPT_FILE" ] || { echo "::error::prompt not found: $PROMPT_FILE"; exit 1; }
@@ -443,6 +643,32 @@ jobs:
           # shell-local MSG var — it would not be exported to a child process.
           # Use printf to build the header with real newlines (YAML-safe).
           HEADER=$(printf 'Target: %s #%s in repo %s\nUse the github-code-review skill (for a PR) or your triage procedure (for an issue) to act on it. The GitHub App token is available to you via scripts/app-token.sh in the review-bot profile; mint it before calling gh. Do NOT ask the human for secrets.\n' "$TARGET_KIND" "$TARGET_NUMBER" "$REPO")
+          # One session per pull request, so every round of the same PR continues the
+          # same conversation (the reviewer remembers what it said last round) while
+          # DIFFERENT PRs stay independent and can be reviewed in parallel. The id is
+          # derived from the repo, not from the request text, because the text-derived
+          # one made every @mention of a PR land in the same session — which is what
+          # queued a backlog of review rounds behind each other.
+          SESSION_ID=""
+          if [[ "$TARGET_KIND" == "pr" ]]; then
+            # A session id becomes a file name on Hermes' side, so fold the owner and
+            # repo to characters that are safe there ([A-Za-z0-9_-]); a "/" or a ".."
+            # in it would be rejected as an unsafe session id.
+            #
+            # This must stay identical to Mullion's own relay (reviewSessionId in
+            # s3ntin3l8/mullion-session-manager's src/services/hermes-review.ts), or
+            # a review asked for through `mullion review` and one asked for with an
+            # @mention would land in two different sessions and could both run.
+            OWNER_SLUG=$(printf '%s' "$OWNER" | tr -c 'A-Za-z0-9_-' '-')
+            REPO_SLUG=$(printf '%s' "$REPO" | tr -c 'A-Za-z0-9_-' '-')
+            SESSION_ID="hermes-review-${OWNER_SLUG}-${REPO_SLUG}-$TARGET_NUMBER"
+          fi
+          if [[ -n "$HEAD_SHA" ]]; then
+            HEADER+=$(printf '\nReview the pull request at commit %s — that exact commit. If the PR head has moved since this request, say so in the review instead of reviewing a newer head.\n' "$HEAD_SHA")
+          fi
+          if [[ -n "$BASE_SHA" ]]; then
+            HEADER+=$(printf '\nThis is a FOLLOW-UP round. The previous round reviewed up to %s. Review ONLY what changed since then: the range %s..%s (git diff %s..%s). Earlier rounds are in the history of this session: do not re-review them, but DO flag anything in the new range that interacts with what was found before, and state whether the previous round findings are addressed. If %s is not an ancestor of %s (the PR was rebased), review the whole PR instead.\n' "$BASE_SHA" "$BASE_SHA" "$HEAD_SHA" "$BASE_SHA" "$HEAD_SHA" "$BASE_SHA" "$HEAD_SHA")
+          fi
           if [[ -n "$MODEL" ]]; then
             HEADER+=$(printf '\nPrefer model: %s\n' "$MODEL")
           fi
@@ -450,15 +676,179 @@ jobs:
 
           MSG="$HEADER$(cat "$PROMPT_FILE")"
 
+          # ── Runs API path (opt-in via hermes-use-runs) ───────────────────────────────
+          # POST /v1/runs answers 202 + run_id as soon as the run is admitted, so unlike the
+          # legacy call below a connection failure or non-202 here is a real failure, and
+          # the run can be polled to a terminal status.
+          #
+          # The Idempotency-Key is the REVIEW RANGE, not this workflow run: a key per
+          # (PR, base..head) means a second @mention on the same head replays the run that
+          # is already there instead of queueing a second review of the same diff. (The
+          # key used to carry the workflow run id + attempt, so every mention dispatched
+          # a fresh review — the queueing this protocol exists to prevent.) The body is a
+          # pure function of the key, because Hermes fingerprints the request body: a
+          # different body under the same key is a 409 conflict, not a replay.
+          if [[ "$USE_RUNS" == "true" ]]; then
+            RESP=$(mktemp)
+            if [[ "$TARGET_KIND" == "pr" && -n "$HEAD_SHA" ]]; then
+              IDEMPOTENCY_KEY="hermes-review:$REPO#$TARGET_NUMBER@$BASE_SHA..$HEAD_SHA"
+            else
+              # An issue triage has no commit to pin; keep the per-run key so a triage
+              # request is never replayed into a stale one.
+              IDEMPOTENCY_KEY="gha:$REPO#$TARGET_NUMBER:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
+            fi
+            RUN_BODY=$(jq -nc --arg model "$API_MODEL" --arg input "$MSG" --arg session "$SESSION_ID" \
+              '{model:$model,input:$input} + (if $session == "" then {} else {session_id:$session} end)')
+            set +e
+            HTTP_CODE=$(curl -sS -m 30 -o "$RESP" -w '%{http_code}' \
+              -X POST "$API_URL/v1/runs" \
+              -H "Authorization: Bearer $API_KEY" \
+              -H "Content-Type: application/json" \
+              -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+              --data "$RUN_BODY")
+            CURL_EXIT=$?
+            set -e
+            if [[ "$CURL_EXIT" != "0" ]]; then
+              echo "::error::Could not reach the Hermes API to dispatch the run (curl exit $CURL_EXIT) — review NOT dispatched."
+              exit 1
+            fi
+            if [[ "$HTTP_CODE" == "401" || "$HTTP_CODE" == "403" ]]; then
+              echo "::error::Hermes API rejected the key (HTTP $HTTP_CODE) — check HERMES_API_KEY secret."
+              exit 1
+            fi
+            if [[ "$HTTP_CODE" == "429" ]]; then
+              # Hermes' own concurrent-run cap. The request was NOT admitted, so say so
+              # loudly: a green run here would read as "relayed" and invite another
+              # request, which is how the queue used to grow.
+              echo "::error::Hermes is at its concurrent-run cap (HTTP 429) — review NOT dispatched. Wait for a running review to finish and try again."
+              exit 1
+            fi
+            if [[ "$HTTP_CODE" == "409" ]]; then
+              echo "::notice::Hermes reports a conflicting run for this request (HTTP 409: $(jq -r '.error.code // "idempotency_key_conflict"' "$RESP" 2>/dev/null || echo idempotency_key_conflict)) — a review of this range already exists; not dispatching another."
+              exit 0
+            fi
+            if [[ "$HTTP_CODE" != "202" && "$HTTP_CODE" != "200" ]]; then
+              echo "::error::Hermes API returned HTTP $HTTP_CODE — review NOT dispatched: $(head -c 300 "$RESP" | tr '\n' ' ')"
+              exit 1
+            fi
+            RUN_ID=$(jq -r '.run_id // empty' "$RESP")
+            if [[ -z "$RUN_ID" ]]; then
+              echo "::error::Hermes accepted the request but returned no run_id — cannot track the review."
+              exit 1
+            fi
+            echo "::notice::dispatched Hermes run $RUN_ID; polling until it finishes."
+            REPLAYED=$(jq -r '.replayed // false' "$RESP")
+            if [[ "$REPLAYED" == "true" ]]; then
+              echo "::notice::Hermes replayed the existing run $RUN_ID for this range (idempotency key $IDEMPOTENCY_KEY) — no second review was dispatched."
+            fi
+
+            # The in-flight marker: a check run on the reviewed head whose external_id
+            # is the Hermes run id. A later request finds it, reads the run's status,
+            # and either waits for it or stops it when the head has moved on — instead
+            # of queueing another review behind it.
+            CHECK_RUN_ID=""
+            if [[ "$LEDGER" == "check-run" && "$TARGET_KIND" == "pr" && -n "$HEAD_SHA" ]]; then
+              set +e
+              CHECK_RUN_ID=$(gh api --method POST "repos/$REPO/check-runs" \
+                -f name="$LEDGER_NAME" -f head_sha="$HEAD_SHA" -f external_id="$RUN_ID" \
+                -f status=in_progress \
+                -f details_url="https://github.com/$REPO/pull/$TARGET_NUMBER" \
+                --jq '.id' 2>/dev/null)
+              set -e
+              if [[ -z "$CHECK_RUN_ID" ]]; then
+                echo "::warning::could not write the in-flight marker for run $RUN_ID — a later request may queue another review behind this one."
+              else
+                echo "::notice::in-flight marker written (check run $CHECK_RUN_ID, external_id $RUN_ID)."
+              fi
+            fi
+
+            POLL_INTERVAL="${HERMES_POLL_INTERVAL:-15}"
+            POLL_DEADLINE=$(( SECONDS + ${HERMES_POLL_SECONDS:-1500} ))
+            MISSES=0
+            STATUS=""
+            while (( SECONDS < POLL_DEADLINE )); do
+              set +e
+              CODE=$(curl -sS -m 10 -o "$RESP" -w '%{http_code}' \
+                "$API_URL/v1/runs/$RUN_ID" -H "Authorization: Bearer $API_KEY")
+              CURL_EXIT=$?
+              set -e
+              if [[ "$CURL_EXIT" != "0" || "$CODE" != "200" ]]; then
+                if [[ "$CODE" == "404" ]]; then
+                  echo "::error::Hermes no longer knows run $RUN_ID (expired or gateway state lost) — outcome unknown."
+                  exit 1
+                fi
+                MISSES=$(( MISSES + 1 ))
+                if (( MISSES >= 8 )); then
+                  echo "::error::Lost contact with the Hermes API while polling run $RUN_ID (last HTTP $CODE, curl exit $CURL_EXIT)."
+                  exit 1
+                fi
+                sleep "$POLL_INTERVAL"
+                continue
+              fi
+              MISSES=0
+              STATUS=$(jq -r '.status // "unknown"' "$RESP")
+              case "$STATUS" in
+                completed|failed|cancelled|interrupted) break ;;
+              esac
+              sleep "$POLL_INTERVAL"
+            done
+
+            {
+              echo "### Hermes run \`$RUN_ID\`: ${STATUS:-unknown}"
+              ERR=$(jq -r '.error // empty' "$RESP" 2>/dev/null | head -c 2000)
+              OUT=$(jq -r '.output // empty' "$RESP" 2>/dev/null | head -c 4000)
+              [[ -n "$ERR" ]] && printf '\n**Error:** %s\n' "$ERR"
+              [[ -n "$OUT" ]] && printf '\n%s\n' "$OUT"
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+            # Close the in-flight marker so the next request does not mistake this
+            # finished run for a live one.
+            if [[ -n "$CHECK_RUN_ID" ]]; then
+              case "$STATUS" in
+                completed) CONCLUSION=success ;;
+                failed|cancelled|interrupted) CONCLUSION=failure ;;
+                *) CONCLUSION=neutral ;;
+              esac
+              set +e
+              gh api --method PATCH "repos/$REPO/check-runs/$CHECK_RUN_ID" \
+                -f status=completed -f conclusion="$CONCLUSION" \
+                -f completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /dev/null 2>&1
+              set -e
+            fi
+
+            case "$STATUS" in
+              completed)
+                echo "::notice::Hermes run $RUN_ID completed."
+                exit 0 ;;
+              failed|cancelled|interrupted)
+                echo "::error::Hermes run $RUN_ID ended $STATUS: $(jq -r '.error // "no error reported"' "$RESP" | head -n 1 | head -c 300)"
+                exit 1 ;;
+              *)
+                echo "::warning::Hermes run $RUN_ID was still ${STATUS:-running} after the polling window; it continues on hermes-01 and posts to GitHub itself."
+                exit 0 ;;
+            esac
+          fi
+
           # Fire-and-forget: send the prompt, ignore the (async) response body.
           # -m 20s cap: we only need the server to ACCEPT the request, not to finish.
           # Temporarily disable -e to capture curl's real exit code (not just a
           # collapsed "000" http_code) without aborting the script on a nonzero exit.
+          #
+          # The session id is the SAME one the Runs API path above uses, so a repo that
+          # opts into `hermes-use-runs` later keeps the same review history. (Without
+          # it, this endpoint derives the session id from a hash of the request text, so
+          # every @mention of a PR landed in the same session and queued behind the
+          # previous one.)
+          SESSION_HEADER=()
+          if [[ -n "$SESSION_ID" ]]; then
+            SESSION_HEADER=(-H "X-Hermes-Session-Id: $SESSION_ID")
+          fi
           set +e
           HTTP_CODE=$(curl -sS -m 20 -o /dev/null -w '%{http_code}' \
             -X POST "$API_URL/v1/chat/completions" \
             -H "Authorization: Bearer $API_KEY" \
             -H "Content-Type: application/json" \
+            "${SESSION_HEADER[@]+"${SESSION_HEADER[@]}"}" \
             --data "$(jq -nc --arg model "$API_MODEL" --arg content "$MSG" \
               '{model:$model, messages:[{role:"user",content:$content}], stream:false}')" \
             2>/dev/null)
@@ -467,6 +857,13 @@ jobs:
           echo "::notice::relayed request to hermes-01 (HTTP $HTTP_CODE, curl exit $CURL_EXIT); agent runs async and posts results to GitHub itself."
           if [[ "$HTTP_CODE" == "401" || "$HTTP_CODE" == "403" ]]; then
             echo "::error::Hermes API rejected the key (HTTP $HTTP_CODE) — check HERMES_API_KEY secret."
+            exit 1
+          fi
+          if [[ "$HTTP_CODE" == "429" ]]; then
+            # Hermes' own concurrent-run cap: the request was NOT admitted. Failing here
+            # is the point — the old path reported this as a successful relay, so a
+            # saturated gateway read as "relayed" and invited another request.
+            echo "::error::Hermes is at its concurrent-run cap (HTTP 429) — review NOT dispatched. Wait for a running review to finish and try again."
             exit 1
           fi
           # curl exit 6 (DNS failure) / 7 (connection refused): the server was reachable
@@ -482,6 +879,9 @@ jobs:
           # is the expected outcome for any non-trivial review (see comment above this
           # step) -> treat as accepted-and-running.
 
+# With `hermes-use-runs: true` the "Run Hermes" step dispatches via POST /v1/runs and polls the
+# run to a terminal status instead (see that input and the README); the agent still posts to
+# GitHub itself either way.
 # NOTE: No "post review" step here — the agent on hermes-01 performs the POST using its
 # own App token, exactly as PR #18's original local design did. This preserves the
 # centralized-prompt, trigger-agnostic, reusable behaviour without installing Hermes on
