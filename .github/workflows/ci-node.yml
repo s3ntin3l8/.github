@@ -32,13 +32,17 @@ on:
         description: >-
           npm script to build the code a `test-shard` job needs, overriding
           `build-script` for the shard jobs ONLY. Empty (the default) means
-          "use `build-script`", so existing callers are unaffected. Set it to
-          an empty string to skip the build step in every shard job: a
-          `test-shard` job runs the test suite against the SOURCE tree, so a
-          caller whose tests do not resolve workspace packages through their
-          built output (e.g. a TS project whose tests import `src/` directly)
-          pays for a full `npm run build` per shard for nothing. `lint-and-test`
-          still builds once, so a broken build is still caught.
+          "use `build-script`". Set it to 'none' to skip the build step in
+          every shard job: a `test-shard` job runs the test suite against
+          the SOURCE tree, so a caller whose tests do not resolve workspace
+          packages through their built output (e.g. a TS project whose tests
+          import `src/` directly) pays for a full `npm run build` per shard
+          for nothing. `lint-and-test` still builds once, so a broken build
+          is still caught.
+
+          The skip is the literal string 'none', not an empty string: an
+          empty value is indistinguishable from "not set" and means "use
+          `build-script`".
         required: false
         type: string
         default: ''
@@ -579,6 +583,10 @@ jobs:
           BUILD_SCRIPT: ${{ inputs.shard-build-script || inputs.build-script }}
           BUILD_ENV: ${{ inputs.build-env }}
         run: |
+          if [ "$BUILD_SCRIPT" = "none" ]; then
+            echo "shard-build-script=none: this caller's shard jobs run against the source tree, so the build is skipped."
+            exit 0
+          fi
           build=$(npm pkg get "scripts.$BUILD_SCRIPT")
           if [ "$build" != "{}" ] && [ -n "$build" ]; then
             if [ -n "$BUILD_ENV" ]; then
