@@ -213,7 +213,10 @@ on:
           job summary. Default false keeps the legacy fire-and-forget POST to
           /v1/chat/completions, which cannot tell a long healthy run from a silent failure.
           The polling job holds its runner for the length of the review, so give the repo a
-          second self-hosted runner before opting in.
+          second self-hosted runner before opting in. The poll window is 45 minutes; a run
+          still going after it leaves the job green with a warning (it is not a verdict on
+          the review) and the "Hermes review" marker check pending until a later round sees
+          the run finished.
       hermes-review-scope:
         required: false
         type: string
@@ -302,7 +305,11 @@ jobs:
         )
       )
     runs-on: self-hosted
-    timeout-minutes: 30
+    # The job timeout is the BACKSTOP, not the normal exit: the Runs-API poll window
+    # (HERMES_POLL_SECONDS, default 2700 = 45 min, capped at 3000) must end well before
+    # it, or a still-running review is cut off mid-poll with its marker left open and no
+    # summary. Move the two together. Measured review jobs run 2-38 minutes.
+    timeout-minutes: 60
     steps:
       # A `pull_request` run authored by dependabot[bot] gets Dependabot secrets, NOT
       # Actions secrets. A repo that has not mirrored HERMES_* into Settings -> Secrets
@@ -633,7 +640,7 @@ jobs:
           # check-run id (the latest dispatch) wins. The name is filtered server-side and
           # the suite window is wide, so a busy commit cannot push the marker out of view.
           QUERY=$(cat <<'GQL'
-          query($owner:String!,$repo:String!,$number:Int!,$name:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){commits(last:5){nodes{commit{oid checkSuites(first:100){nodes{checkRuns(first:20,filterBy:{checkName:$name}){nodes{databaseId name externalId}}}}}}}}}}
+          query($owner:String!,$repo:String!,$number:Int!,$name:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){commits(last:5){nodes{commit{oid checkSuites(first:100){nodes{checkRuns(first:20,filterBy:{checkName:$name}){nodes{databaseId name externalId status}}}}}}}}}}
           GQL
           )
           # `gh api graphql` takes the repository's NAME, not "owner/repo" (the
@@ -644,7 +651,7 @@ jobs:
           MARKER=$(gh api graphql \
             -f query="$QUERY" \
             -F owner="$OWNER" -F repo="$REPO_NAME" -F number="$NUMBER" -f name="$LEDGER_NAME" \
-            --jq '[.data.repository.pullRequest.commits.nodes[] | .commit.oid as $oid | .commit.checkSuites.nodes[].checkRuns.nodes[] | select(.name == env.LEDGER_NAME and .externalId != null and .externalId != "") | {oid: $oid, id: .databaseId, run: .externalId}] | sort_by(.id) | last // empty')
+            --jq '[.data.repository.pullRequest.commits.nodes[] | .commit.oid as $oid | .commit.checkSuites.nodes[].checkRuns.nodes[] | select(.name == env.LEDGER_NAME and .externalId != null and .externalId != "") | {oid: $oid, id: .databaseId, run: .externalId, open: (.status != "COMPLETED")}] | sort_by(.id) | last // empty')
           if [[ -z "$MARKER" ]]; then
             exit 0
           fi
@@ -675,10 +682,30 @@ jobs:
             *)
               # Terminal (completed/failed/cancelled/interrupted), a status this
               # workflow does not know, or an empty answer (Hermes does not know the
-              # run any more): the marker is stale, so a fresh round is dispatched. An
+              # run any more): the marker is stale, so a fresh round is dispatched. A
+              # marker the poll window left open (the review outlived it) whose run is
+              # now KNOWN to be over is closed here with the run's real outcome; an
+              # unknown or empty status is not proof of an outcome, so it stays open. An
               # unreadable answer is treated as stale rather than in flight — blocking
               # on it would silently drop reviews, and the idempotency key still keeps
               # a repeat request from queuing a second run of the same range.
+              MARKER_ID=$(jq -r '.id // empty' <<< "$MARKER")
+              MARKER_OPEN=$(jq -r '.open // false' <<< "$MARKER")
+              if [[ "$MARKER_OPEN" == "true" && -n "$MARKER_ID" ]]; then
+                STALE_CONCLUSION=""
+                case "$STATUS" in
+                  completed) STALE_CONCLUSION=success ;;
+                  failed|cancelled|interrupted) STALE_CONCLUSION=failure ;;
+                esac
+                if [[ -n "$STALE_CONCLUSION" ]]; then
+                  set +e
+                  gh api --method PATCH "repos/$REPO/check-runs/$MARKER_ID" \
+                    -f status=completed -f conclusion="$STALE_CONCLUSION" \
+                    -f completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /dev/null 2>&1 \
+                    && echo "::notice::closed the left-open marker for run $MARKER_RUN ($STATUS -> $STALE_CONCLUSION)."
+                  set -e
+                fi
+              fi
               ;;
           esac
 
@@ -1095,7 +1122,15 @@ jobs:
             fi
 
             POLL_INTERVAL="${HERMES_POLL_INTERVAL:-15}"
-            POLL_DEADLINE=$(( SECONDS + ${HERMES_POLL_SECONDS:-1500} ))
+            # The window has to end before the job's own timeout-minutes (60) with room for
+            # the steps that run before the poll, so an override above the cap is clamped
+            # instead of letting the job timeout cut the poll off.
+            POLL_SECONDS="${HERMES_POLL_SECONDS:-2700}"
+            if (( POLL_SECONDS > 3000 )); then
+              echo "::warning::HERMES_POLL_SECONDS=$POLL_SECONDS exceeds the job timeout budget - clamped to 3000."
+              POLL_SECONDS=3000
+            fi
+            POLL_DEADLINE=$(( SECONDS + POLL_SECONDS ))
             MISSES=0
             STATUS=""
             while (( SECONDS < POLL_DEADLINE )); do
@@ -1134,18 +1169,25 @@ jobs:
             } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
             # Close the in-flight marker so the next request does not mistake this
-            # finished run for a live one.
+            # finished run for a live one. A run that is STILL going when the window ends
+            # is not finished: its marker stays open (in_progress) so the PR does not read
+            # "relayed and done" for a review that is still working. The next round's
+            # in-flight step closes it once Hermes reports the run terminal. (The marker's
+            # summary is left alone: the next round reads the session id off it, and the
+            # reader requires exactly `session: <id>`.)
             if [[ -n "$CHECK_RUN_ID" ]]; then
               case "$STATUS" in
                 completed) CONCLUSION=success ;;
                 failed|cancelled|interrupted) CONCLUSION=failure ;;
-                *) CONCLUSION=neutral ;;
+                *) CONCLUSION="" ;;
               esac
-              set +e
-              gh api --method PATCH "repos/$REPO/check-runs/$CHECK_RUN_ID" \
-                -f status=completed -f conclusion="$CONCLUSION" \
-                -f completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /dev/null 2>&1
-              set -e
+              if [[ -n "$CONCLUSION" ]]; then
+                set +e
+                gh api --method PATCH "repos/$REPO/check-runs/$CHECK_RUN_ID" \
+                  -f status=completed -f conclusion="$CONCLUSION" \
+                  -f completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /dev/null 2>&1
+                set -e
+              fi
             fi
 
             case "$STATUS" in
@@ -1156,7 +1198,7 @@ jobs:
                 echo "::error::Hermes run $RUN_ID ended $STATUS: $(jq -r '.error // "no error reported"' "$RESP" | head -n 1 | head -c 300)"
                 exit 1 ;;
               *)
-                echo "::warning::Hermes run $RUN_ID was still ${STATUS:-running} after the polling window; it continues on hermes-01 and posts to GitHub itself."
+                echo "::warning::Hermes run $RUN_ID was still ${STATUS:-running} after the polling window; it continues on hermes-01 and posts to GitHub itself. This check is NOT a verdict on the review - the 'Hermes review' marker stays pending until the run is seen finished."
                 exit 0 ;;
             esac
           fi
