@@ -676,6 +676,15 @@ jobs:
               set +e
               curl -sS -m 15 -X POST "$API_URL/v1/runs/$MARKER_RUN/stop" \
                 -H "Authorization: Bearer $API_KEY" -o /dev/null
+              # The stopped run's marker is never selected again (the next dispatch writes a
+              # higher id), so close it now instead of leaving it pending forever.
+              MARKER_ID=$(jq -r '.id // empty' <<< "$MARKER")
+              if [[ -n "$MARKER_ID" ]]; then
+                gh api --method PATCH "repos/$REPO/check-runs/$MARKER_ID" \
+                  -f status=completed -f conclusion=cancelled \
+                  -f completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /dev/null 2>&1 \
+                  && echo "::notice::closed the stopped run's marker (cancelled)."
+              fi
               set -e
               echo "stale_run=$MARKER_RUN" >> "$GITHUB_OUTPUT"
               ;;
@@ -1126,6 +1135,10 @@ jobs:
             # the steps that run before the poll, so an override above the cap is clamped
             # instead of letting the job timeout cut the poll off.
             POLL_SECONDS="${HERMES_POLL_SECONDS:-2700}"
+            if [[ ! "$POLL_SECONDS" =~ ^[0-9]+$ ]]; then
+              echo "::warning::HERMES_POLL_SECONDS='$POLL_SECONDS' is not a number of seconds - using 2700."
+              POLL_SECONDS=2700
+            fi
             if (( POLL_SECONDS > 3000 )); then
               echo "::warning::HERMES_POLL_SECONDS=$POLL_SECONDS exceeds the job timeout budget - clamped to 3000."
               POLL_SECONDS=3000
@@ -1198,7 +1211,7 @@ jobs:
                 echo "::error::Hermes run $RUN_ID ended $STATUS: $(jq -r '.error // "no error reported"' "$RESP" | head -n 1 | head -c 300)"
                 exit 1 ;;
               *)
-                echo "::warning::Hermes run $RUN_ID was still ${STATUS:-running} after the polling window; it continues on hermes-01 and posts to GitHub itself. This check is NOT a verdict on the review - the 'Hermes review' marker stays pending until the run is seen finished."
+                echo "::warning::Hermes run $RUN_ID was still ${STATUS:-running} after the polling window; it continues on hermes-01 and posts to GitHub itself. This job's conclusion is NOT a verdict on the review: to gate on the review, gate on the '$LEDGER_NAME' check, which stays pending until the run is seen finished."
                 exit 0 ;;
             esac
           fi

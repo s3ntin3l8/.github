@@ -10,6 +10,8 @@
 # "owner/owner/repo"), which no YAML or shellcheck pass would have caught.
 #
 # Usage: scripts/test-hermes-review.sh
+# Needs PyYAML in the `python3` first on PATH (it extracts the steps from the YAML); a
+# venv python without it fails every section with `No module named 'yaml'`.
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -249,6 +251,7 @@ run_step inflight true                 # the same head is already being reviewed
 marker "old999:run_live:10"
 run_step inflight false                # the head moved -> stop the stale run
 grep -q "^stale_run=run_live" "$TMP/out.inflight" && check "the stale run is stopped" yes || check "the stale run is stopped" no
+grep -q "check-run patched.*check-runs/10 .*conclusion=cancelled" "$GH_LOG" && check "the stopped run's marker is closed cancelled" yes || check "the stopped run's marker is closed cancelled" no
 # Commits come OLDEST first and each round leaves a marker: the NEWEST one decides, not the
 # first commit that has one. The old round's run is finished; the head's own is live.
 marker "old999:run_done:10" "head111:run_live:20"
@@ -323,11 +326,17 @@ start_fake '{"run_status":"running","request_log":"'"$TMP"'/requests.log"}'
 : > "$GH_LOG"
 ( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.expiry" 2>&1; rc=$?
 [[ $rc -eq 0 ]] && check "expiry: the job does not claim the review failed (exit 0)" yes || check "expiry: the job does not claim the review failed (exit 0)" no
-grep -q "NOT a verdict" "$TMP/log.expiry" && check "expiry: the warning says the check is not a verdict" yes || check "expiry: the warning says the check is not a verdict" no
+grep -q "NOT a verdict.*Hermes review" "$TMP/log.expiry" && check "expiry: the warning says the check is not a verdict" yes || check "expiry: the warning says the check is not a verdict" no
 grep -q "check-run created" "$GH_LOG" && check "expiry: the marker was written" yes || check "expiry: the marker was written" no
 grep -q "check-run patched" "$GH_LOG" \
   && check "expiry: the marker is NOT closed while the review still runs" no \
   || check "expiry: the marker is NOT closed while the review still runs" yes
+stop_fake
+
+echo "== a non-numeric poll window falls back to the default =="
+start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+HERMES_POLL_SECONDS=abc bash -c 'set -uo pipefail; . "$1"' _ "$TMP/run.sh" > "$TMP/log.nan" 2>&1; rc=$?
+grep -q "not a number of seconds" "$TMP/log.nan" && [[ $rc -eq 0 ]] && check "a non-numeric HERMES_POLL_SECONDS falls back instead of crashing" yes || check "a non-numeric HERMES_POLL_SECONDS falls back instead of crashing" no
 stop_fake
 
 echo "== the poll window is clamped under the job timeout =="
