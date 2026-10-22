@@ -28,6 +28,20 @@ on:
         required: false
         type: string
         default: 'build'
+      shard-build-script:
+        description: >-
+          npm script to build the code a `test-shard` job needs, overriding
+          `build-script` for the shard jobs ONLY. Empty (the default) means
+          "use `build-script`", so existing callers are unaffected. Set it to
+          an empty string to skip the build step in every shard job: a
+          `test-shard` job runs the test suite against the SOURCE tree, so a
+          caller whose tests do not resolve workspace packages through their
+          built output (e.g. a TS project whose tests import `src/` directly)
+          pays for a full `npm run build` per shard for nothing. `lint-and-test`
+          still builds once, so a broken build is still caught.
+        required: false
+        type: string
+        default: ''
       build-env:
         description: >-
           Extra environment variables for the build step, one KEY=VALUE per
@@ -80,6 +94,39 @@ on:
         required: false
         type: string
         default: '1'
+      test-shard-matrix:
+        description: >-
+          The shard matrix as a JSON array of shard indices (e.g. '[1,2,3,4]'),
+          consumed directly by the `test-shard` job's `strategy.matrix.shard`.
+          Unlike `test-shards`, this needs no `shard-plan` job to compute the
+          array — GitHub cannot build a numeric range into a matrix, which is
+          why the count-based input has to spend a whole runner job on `jq`.
+          When set, `test-shard-matrix` wins over `test-shards` and the
+          `shard-plan` job is skipped. The shard COUNT still has to be
+          passed as `test-shards` for the `--shard=i/N` argument and the
+          `test-merge` job's `if:`, so set both.
+        required: false
+        type: string
+        default: ''
+      artifact-prefix:
+        description: >-
+          A short prefix that namespaces this caller's shard coverage
+          artifacts, e.g. '-frontend'. The artifacts are named
+          `coverage-shard<prefix>-<n>` and `test-merge` downloads
+          `coverage-shard<prefix>-*`.
+
+          It matters when ONE workflow run calls this reusable workflow more
+          than once with sharding on: artifact names are scoped to the RUN,
+          not to the caller, so two sharded callers both uploading
+          `coverage-shard-1` collide — and `test-merge` then downloads the
+          WRONG map (the other caller's), silently merging two workspaces'
+          coverage into one report. Give each sharded caller its own prefix
+          ('-backend', '-frontend', ...). Empty (the default) keeps today's
+          names exactly, which is correct for the common case of a single
+          sharded caller per run.
+        required: false
+        type: string
+        default: ''
       turbo-cache:
         description: >-
           Cache Turborepo's local cache directories (`**/.turbo` under
@@ -145,8 +192,13 @@ jobs:
   # `test-shard` below can consume it via `strategy.matrix.shard`. Only runs when
   # sharding is actually requested — kept out of `lint-and-test` so that job's step
   # list stays byte-for-byte identical to before this input existed.
+  #
+  # SKIPPED when the caller supplies `test-shard-matrix` directly: this job
+  # spends a whole runner (spin-up included) to run `jq` and emit `[1..N]`,
+  # which the caller can just as well write out. `test-shard-matrix` wins
+  # when both are set.
   shard-plan:
-    if: ${{ fromJSON(inputs.test-shards) > 1 }}
+    if: ${{ fromJSON(inputs.test-shards) > 1 && inputs.test-shard-matrix == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:
@@ -460,8 +512,18 @@ jobs:
   # Only runs when test-shards > 1 (see shard-plan). Runs in parallel with
   # lint-and-test (no `needs:` between them) — lint/typecheck/build no longer block
   # on, or get blocked by, the sharded test matrix.
+  #
+  # `!cancelled()` + an explicit readiness condition, rather than `always()`:
+  # a job whose `needs:` a skipped job is itself skipped, so the shard job
+  # would disappear when `shard-plan` is skipped (which is what
+  # `test-shard-matrix` does). `!cancelled()` keeps a cancelled run from
+  # starting fresh shards, and the second clause keeps a FAILED `shard-plan`
+  # from starting shards with no matrix — in that case the job is skipped,
+  # exactly as before, and `test-merge`'s "Fail if any shard failed" guard
+  # turns it into a red required check.
   test-shard:
     needs: shard-plan
+    if: ${{ !cancelled() && fromJSON(inputs.test-shards) > 1 && (needs.shard-plan.result == 'success' || inputs.test-shard-matrix != '') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -472,7 +534,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(needs.shard-plan.outputs.shards) }}
+        # The caller's explicit matrix wins; otherwise fall back to the array
+        # `shard-plan` computed from `test-shards`. The final `|| '[]'` keeps
+        # `fromJSON` from erroring on an empty string if `shard-plan` itself
+        # failed — an empty matrix leaves the shard job skipped, which
+        # `test-merge`'s "Fail if any shard failed" guard turns into a red
+        # required check (exactly as before this input existed).
+        shard: ${{ fromJSON(inputs.test-shard-matrix || needs.shard-plan.outputs.shards || '[]') }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -499,9 +567,16 @@ jobs:
       # it needs its own explicit build — callers whose tests resolve workspace
       # packages via each package's *built* output rather than source (e.g. a web
       # app with no src-alias override) fail import resolution without this.
+      #
+      # `shard-build-script` overrides `build-script` for the shard jobs only.
+      # A caller whose tests run against the SOURCE tree (no src-alias override
+      # needed) can set it to an empty string to skip this step entirely —
+      # otherwise every shard pays for a full build it never uses. An empty
+      # script name resolves to `{}` from `npm pkg get`, which the guard below
+      # already treats as "skip the build".
       - name: Build dependencies
         env:
-          BUILD_SCRIPT: ${{ inputs.build-script }}
+          BUILD_SCRIPT: ${{ inputs.shard-build-script || inputs.build-script }}
           BUILD_ENV: ${{ inputs.build-env }}
         run: |
           build=$(npm pkg get "scripts.$BUILD_SCRIPT")
@@ -522,6 +597,7 @@ jobs:
           TEST_POOL: ${{ inputs.test-pool }}
           SHARD: ${{ matrix.shard }}
           TOTAL_SHARDS: ${{ inputs.test-shards }}
+          TEST_SHARD_MATRIX: ${{ inputs.test-shard-matrix }}
         run: |
           script_val=$(npm pkg get "scripts.$TEST_SCRIPT")
           if [ "$script_val" = "{}" ] || [ -z "$script_val" ]; then
@@ -532,7 +608,16 @@ jobs:
           if [ -n "$TEST_POOL" ]; then
             pool=(--pool="$TEST_POOL")
           fi
-          npm run "$TEST_SCRIPT" -- --shard="${SHARD}/${TOTAL_SHARDS}" "${pool[@]}"
+          # When the caller supplied the matrix explicitly, its LENGTH is the
+          # shard count — deriving it here means a matrix whose length
+          # disagrees with `test-shards` still produces a correct
+          # `--shard=i/N` (and therefore a correct, complete split) instead of
+          # a malformed one.
+          total="$TOTAL_SHARDS"
+          if [ -n "$TEST_SHARD_MATRIX" ]; then
+            total=$(printf '%s' "$TEST_SHARD_MATRIX" | jq 'length')
+          fi
+          npm run "$TEST_SCRIPT" -- --shard="${SHARD}/${total}" "${pool[@]}"
       - name: Upload shard coverage
         # coverage-final.json is istanbul's raw per-file hit-map (NOT the
         # coverage-summary.json percentages) — test-merge needs the hit-maps to
@@ -542,7 +627,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: coverage-shard-${{ matrix.shard }}
+          name: coverage-shard${{ inputs.artifact-prefix }}-${{ matrix.shard }}
           path: |
             ${{ inputs.working-directory }}/coverage/coverage-final.json
             ${{ inputs.working-directory }}/junit.xml
@@ -590,9 +675,12 @@ jobs:
           exit 1
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: coverage-shard-*
+          pattern: coverage-shard${{ inputs.artifact-prefix }}-*
           path: ${{ inputs.working-directory }}/.shard-artifacts
       - name: Merge shard coverage
+        env:
+          TEST_SHARDS: ${{ inputs.test-shards }}
+          TEST_SHARD_MATRIX: ${{ inputs.test-shard-matrix }}
         run: |
           mkdir -p .nyc_output coverage
           # Flatten each shard's coverage-final.json into .nyc_output/ under a unique
@@ -602,6 +690,23 @@ jobs:
           done
           if [ -z "$(ls -A .nyc_output 2>/dev/null)" ]; then
             echo "::error::No shard produced coverage/coverage-final.json — ensure the coverage reporter list includes \"json\" (see the test-shards input description)."
+            exit 1
+          fi
+          # Every shard must have contributed EXACTLY one map. A count that
+          # is too low means a shard's artifact was overwritten by another
+          # caller in this run uploading the same artifact name (artifact
+          # names are scoped to the run, not the caller) — which merges the
+          # WRONG workspace's coverage into this report and silently reports
+          # a wrong percentage. A count that is too high means a stray
+          # artifact was picked up by the download pattern. Either way, fail
+          # loudly instead of reporting a number that means nothing.
+          map_count=$(find .shard-artifacts -name coverage-final.json | wc -l | tr -d ' ')
+          expected="$TEST_SHARDS"
+          if [ -n "$TEST_SHARD_MATRIX" ]; then
+            expected=$(printf '%s' "$TEST_SHARD_MATRIX" | jq 'length')
+          fi
+          if [ "$map_count" -ne "$expected" ]; then
+            echo "::error::Expected $expected shard coverage map(s) but found $map_count — a shard artifact is missing, or another caller in this workflow uploaded an artifact with the same name. Give each sharded caller its own 'artifact-prefix'."
             exit 1
           fi
           # --exclude '' neutralizes nyc's own default exclude-glob list (test files,
@@ -616,7 +721,13 @@ jobs:
           # percentages-only and Codecov can't ingest it; a non-sharded run's
           # coverage/ has this because the caller's own coverage.reporter list
           # already includes "json", which is what feeds Codecov today).
-          npx --yes nyc report --temp-dir .nyc_output --report-dir coverage \
+          #
+          # nyc is PINNED. `npx --yes nyc` fetches whatever npm serves at that
+          # moment, so the coverage gate would run third-party code of
+          # unstated version on every CI run, and would break whenever that
+          # version's release happens to be broken. Bump the pin deliberately,
+          # not by surprise.
+          npx --yes nyc@18.0.0 report --temp-dir .nyc_output --report-dir coverage \
             --reporter=json-summary --reporter=json --reporter=text --exclude ''
       - name: Enforce coverage threshold
         if: ${{ inputs.coverage-fail-under != '0' }}
