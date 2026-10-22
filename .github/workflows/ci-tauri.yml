@@ -135,16 +135,19 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
         run: cargo fmt --check
 
+      # cargo steps below pass --locked: without it cargo silently re-resolves
+      # a Cargo.lock that disagrees with the manifests and carries on, so a
+      # stale lockfile would pass CI. With it, that mismatch fails the step.
       - name: Lint with clippy
         working-directory: ${{ inputs.working-directory }}
         shell: bash
         env:
           CLIPPY_ARGS: ${{ inputs.clippy-args }}
-        run: cargo clippy --all-targets --all-features $CLIPPY_ARGS
+        run: cargo clippy --locked --all-targets --all-features $CLIPPY_ARGS
 
       - name: Test
         working-directory: ${{ inputs.working-directory }}
-        run: cargo test --all-features
+        run: cargo test --locked --all-features
 
       - name: Install cargo-llvm-cov
         if: ${{ inputs.coverage }}
@@ -153,7 +156,7 @@ jobs:
       - name: Coverage with cargo-llvm-cov
         if: ${{ inputs.coverage }}
         working-directory: ${{ inputs.working-directory }}
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked --all-features --lcov --output-path lcov.info
 
       # Self-review caught a real bug in an earlier version of this step:
       # re-invoking `cargo llvm-cov --summary-only` here (a SEPARATE run from
@@ -280,4 +283,4 @@ jobs:
 
       - name: Build
         working-directory: ${{ inputs.working-directory }}
-        run: cargo build --release
+        run: cargo build --release --locked
