@@ -10,6 +10,8 @@
 # "owner/owner/repo"), which no YAML or shellcheck pass would have caught.
 #
 # Usage: scripts/test-hermes-review.sh
+# Needs PyYAML in the `python3` first on PATH (it extracts the steps from the YAML); a
+# venv python without it fails every section with `No module named 'yaml'`.
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -109,7 +111,7 @@ case "$joined" in
     jq -r "$filter" < "$FAKE_MARKER_FILE" 2>/dev/null || echo ""
     exit 0 ;;
   *"--method POST"*"check-runs"*) log "check-run created ${args[*]}"; echo "${FAKE_CHECK_RUN_ID:-4242}"; exit 0 ;;
-  *"--method PATCH"*"check-runs"*) log "check-run patched"; exit 0 ;;
+  *"--method PATCH"*"check-runs"*) log "check-run patched ${args[*]}"; exit 0 ;;
   *"/check-runs"*)
     # The check runs already on a commit — the in-flight marker. The step
     # applies its own --jq filter to this, so the fake does too.
@@ -186,7 +188,7 @@ run_step() { # $1 = step id, $2 = expected skip value
 }
 
 # marker [commit ...]: the PR's commits OLDEST first, as GitHub answers them. A commit is
-# "oid:run:id[+run:id...]" (one marker per run:id), or a bare "oid" for none. No argument =
+# "oid:run:id[:state][+run:id[:state]...]" (one marker per run:id), or a bare "oid" for none. No argument =
 # no commit carries a marker.
 marker() {
   local c oid rest m nodes=""
@@ -196,7 +198,10 @@ marker() {
     if [[ -n "$rest" ]]; then
       IFS=+ read -ra ms <<< "$rest"
       for m in "${ms[@]}"; do
-        runs+="${runs:+,}"'{"databaseId":'"${m#*:}"',"name":"Hermes review","externalId":"'"${m%%:*}"'"}'
+        # "run:id" or "run:id:state" (state = IN_PROGRESS|COMPLETED; default IN_PROGRESS)
+        local mrun=${m%%:*} mrest=${m#*:} mid mstate=IN_PROGRESS
+        mid=${mrest%%:*}; [[ "$mrest" == *:* ]] && mstate=${mrest#*:}
+        runs+="${runs:+,}"'{"databaseId":'"$mid"',"name":"Hermes review","externalId":"'"$mrun"'","status":"'"$mstate"'"}'
       done
     fi
     nodes+="${nodes:+,}"'{"commit":{"oid":"'"$oid"'","checkSuites":{"nodes":[{"checkRuns":{"nodes":['"$runs"']}}]}}}'
@@ -246,6 +251,7 @@ run_step inflight true                 # the same head is already being reviewed
 marker "old999:run_live:10"
 run_step inflight false                # the head moved -> stop the stale run
 grep -q "^stale_run=run_live" "$TMP/out.inflight" && check "the stale run is stopped" yes || check "the stale run is stopped" no
+grep -q "check-run patched.*check-runs/10 .*conclusion=cancelled" "$GH_LOG" && check "the stopped run's marker is closed cancelled" yes || check "the stopped run's marker is closed cancelled" no
 # Commits come OLDEST first and each round leaves a marker: the NEWEST one decides, not the
 # first commit that has one. The old round's run is finished; the head's own is live.
 marker "old999:run_done:10" "head111:run_live:20"
@@ -267,6 +273,42 @@ stop_fake
 start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
 run_step inflight false                # a finished run -> the marker is stale
 
+echo "== a marker the poll window left open =="
+# The review finished after the window ended: the next round closes the marker with the
+# run's real outcome (and only an OPEN marker is touched).
+: > "$GH_LOG"
+marker "head111:run_done:50:IN_PROGRESS"
+run_step inflight false
+grep -q "check-run patched.*check-runs/50 .*conclusion=success" "$GH_LOG" \
+  && check "inflight: a left-open marker of a completed run is closed success" yes \
+  || check "inflight: a left-open marker of a completed run is closed success" no
+: > "$GH_LOG"
+marker "head111:run_done:50:COMPLETED"
+run_step inflight false
+grep -q "check-run patched" "$GH_LOG" \
+  && check "inflight: an already-completed marker is not patched again" no \
+  || check "inflight: an already-completed marker is not patched again" yes
+stop_fake
+start_fake '{"run_status":"failed","request_log":"'"$TMP"'/requests.log"}'
+: > "$GH_LOG"
+marker "head111:run_dead:51:IN_PROGRESS"
+run_step inflight false
+grep -q "check-run patched.*check-runs/51 .*conclusion=failure" "$GH_LOG" \
+  && check "inflight: a left-open marker of a failed run is closed failure" yes \
+  || check "inflight: a left-open marker of a failed run is closed failure" no
+stop_fake
+start_fake '{"run_status":"unheard-of","request_log":"'"$TMP"'/requests.log"}'
+: > "$GH_LOG"
+marker "head111:run_odd:52:IN_PROGRESS"
+run_step inflight false                # an unknown status is stale for dispatch...
+grep -q "check-run patched" "$GH_LOG" \
+  && check "inflight: an unknown status is not proof of an outcome - the marker stays open" no \
+  || check "inflight: an unknown status is not proof of an outcome - the marker stays open" yes
+stop_fake
+# The dispatch section below runs against a fake whose runs have completed.
+marker "old999:run_done:10"
+start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+
 echo "== the dispatch =="
 ( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.run" 2>&1
 grep -q '"idempotency_key": "hermes-review:acme/widgets#42@..head111"' "$TMP/requests.log" \
@@ -277,6 +319,30 @@ grep -q '"session_id": "hermes-review-acme-widgets-42"' "$TMP/requests.log" \
   || check "the run happens in one session per pull request" no
 grep -q "check-run created" "$GH_LOG" && check "the in-flight marker is written" yes || check "the in-flight marker is written" no
 grep -q "check-run patched" "$GH_LOG" && check "the in-flight marker is closed" yes || check "the in-flight marker is closed" no
+stop_fake
+
+echo "== a review still running when the poll window ends =="
+start_fake '{"run_status":"running","request_log":"'"$TMP"'/requests.log"}'
+: > "$GH_LOG"
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.expiry" 2>&1; rc=$?
+[[ $rc -eq 0 ]] && check "expiry: the job does not claim the review failed (exit 0)" yes || check "expiry: the job does not claim the review failed (exit 0)" no
+grep -q "NOT a verdict.*Hermes review" "$TMP/log.expiry" && check "expiry: the warning says the check is not a verdict" yes || check "expiry: the warning says the check is not a verdict" no
+grep -q "check-run created" "$GH_LOG" && check "expiry: the marker was written" yes || check "expiry: the marker was written" no
+grep -q "check-run patched" "$GH_LOG" \
+  && check "expiry: the marker is NOT closed while the review still runs" no \
+  || check "expiry: the marker is NOT closed while the review still runs" yes
+stop_fake
+
+echo "== a non-numeric poll window falls back to the default =="
+start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+HERMES_POLL_SECONDS=abc bash -c 'set -uo pipefail; . "$1"' _ "$TMP/run.sh" > "$TMP/log.nan" 2>&1; rc=$?
+grep -q "not a number of seconds" "$TMP/log.nan" && [[ $rc -eq 0 ]] && check "a non-numeric HERMES_POLL_SECONDS falls back instead of crashing" yes || check "a non-numeric HERMES_POLL_SECONDS falls back instead of crashing" no
+stop_fake
+
+echo "== the poll window is clamped under the job timeout =="
+start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+HERMES_POLL_SECONDS=99999 bash -c 'set -uo pipefail; . "$1"' _ "$TMP/run.sh" > "$TMP/log.clamp" 2>&1
+grep -q "clamped to 3000" "$TMP/log.clamp" && check "an oversized HERMES_POLL_SECONDS is clamped" yes || check "an oversized HERMES_POLL_SECONDS is clamped" no
 stop_fake
 
 echo "== the dispatch refuses what it must =="
