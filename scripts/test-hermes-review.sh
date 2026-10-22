@@ -97,7 +97,16 @@ case "$joined" in
       exit 1
     fi
     log "graphql repo=$repo"
-    cat "${FAKE_MARKER_FILE:-/nonexistent}" 2>/dev/null || echo ""
+    # A raw GraphQL payload, like the real API: the step's own --jq does the
+    # picking, so the selection logic is what the tests exercise.
+    filter=""
+    prev=""
+    for a in "${args[@]}"; do
+      if [[ "$prev" == "--jq" ]]; then filter="$a"; fi
+      prev=$a
+    done
+    [[ -f "${FAKE_MARKER_FILE:-/nonexistent}" ]] || { echo ""; exit 0; }
+    jq -r "$filter" < "$FAKE_MARKER_FILE" 2>/dev/null || echo ""
     exit 0 ;;
   *"--method POST"*"check-runs"*) log "check-run created ${args[*]}"; echo "${FAKE_CHECK_RUN_ID:-4242}"; exit 0 ;;
   *"--method PATCH"*"check-runs"*) log "check-run patched"; exit 0 ;;
@@ -117,16 +126,11 @@ case "$joined" in
     runs='{"total_count":2,"check_runs":[{"id":'"${FAKE_MARKER_ID:-900}"',"name":"'"${LEDGER_NAME:-Hermes review}"'","external_id":"'"${FAKE_MARKER_RUN-run_dead}"'","output":{"summary":"'"${FAKE_MARKER_SESSION:+session: $FAKE_MARKER_SESSION}"'"}}'"$second"']}'
     filter=""
     prev=""
-    slurp=0
     for a in "${args[@]}"; do
       if [[ "$prev" == "--jq" ]]; then filter="$a"; fi
-      [[ "$a" == "--slurp" ]] && slurp=1
       prev="$a"
     done
-    # `gh api --paginate --slurp` would wrap the pages in an array; the
-    # workflow asks for one page, so the fake answers the object itself.
     payload="$runs"
-    [[ "$slurp" == "1" ]] && payload="[$runs]"
     if [[ -n "$filter" ]]; then
       printf '%s' "$payload" | jq -r "$filter" 2>/dev/null || echo ""
     else
@@ -181,7 +185,25 @@ run_step() { # $1 = step id, $2 = expected skip value
   [[ "$got" == "$want" ]] && check "$id -> skip=$want" yes || check "$id -> skip='$got' (want '$want')" no
 }
 
-marker() { printf '%s' "$1" > "$TMP/marker.json"; export FAKE_MARKER_FILE="$TMP/marker.json"; }
+# marker [commit ...]: the PR's commits OLDEST first, as GitHub answers them. A commit is
+# "oid:run:id[+run:id...]" (one marker per run:id), or a bare "oid" for none. No argument =
+# no commit carries a marker.
+marker() {
+  local c oid rest m nodes=""
+  for c in "$@"; do
+    oid=${c%%:*}; rest=""; [[ "$c" == *:* ]] && rest=${c#*:}
+    local runs=""
+    if [[ -n "$rest" ]]; then
+      IFS=+ read -ra ms <<< "$rest"
+      for m in "${ms[@]}"; do
+        runs+="${runs:+,}"'{"databaseId":'"${m#*:}"',"name":"Hermes review","externalId":"'"${m%%:*}"'"}'
+      done
+    fi
+    nodes+="${nodes:+,}"'{"commit":{"oid":"'"$oid"'","checkSuites":{"nodes":[{"checkRuns":{"nodes":['"$runs"']}}]}}}'
+  done
+  printf '%s' '{"data":{"repository":{"pullRequest":{"commits":{"nodes":['"$nodes"']}}}}}' > "$TMP/marker.json"
+  export FAKE_MARKER_FILE="$TMP/marker.json"
+}
 
 # The environment the steps read.
 export API_URL="http://127.0.0.1:$PORT" API_KEY="test-key" GH_TOKEN="test-token"
@@ -217,14 +239,30 @@ export FAKE_LAST_REVIEWED="" FAKE_OTHER_BOT_REVIEWED=""
 
 echo "== the in-flight marker =="
 start_fake '{"run_status":"running","request_log":"'"$TMP"'/requests.log"}'
-marker ""                              # no marker at all
+marker head111                         # a commit, but no marker on it
 run_step inflight false
-marker '{"oid":"head111","run":"run_live"}'
+marker "head111:run_live:10"
 run_step inflight true                 # the same head is already being reviewed
-marker '{"oid":"old999","run":"run_live"}'
+marker "old999:run_live:10"
 run_step inflight false                # the head moved -> stop the stale run
 grep -q "^stale_run=run_live" "$TMP/out.inflight" && check "the stale run is stopped" yes || check "the stale run is stopped" no
-marker '{"oid":"old999","run":"run_done"}'
+# Commits come OLDEST first and each round leaves a marker: the NEWEST one decides, not the
+# first commit that has one. The old round's run is finished; the head's own is live.
+marker "old999:run_done:10" "head111:run_live:20"
+run_step inflight true
+# ...and the reverse: the live run is on the older head, a finished one on the newer.
+marker "old999:run_live:10" "mid555:run_done:20"
+run_step inflight false
+grep -q "^stale_run=$" "$TMP/out.inflight" && check "inflight: the newest marker (finished) wins over an older live one" yes || check "inflight: the newest marker (finished) wins over an older live one" no
+marker "old999:run_done:10" "mid555:run_live:20"
+run_step inflight false
+grep -q "^stale_run=run_live" "$TMP/out.inflight" && check "inflight: the newest marker (live, older head) is the one stopped" yes || check "inflight: the newest marker (live, older head) is the one stopped" no
+# Several markers on ONE commit: the highest id, whatever the position.
+marker "head111:run_done:30+run_live:40"
+run_step inflight true
+marker "head111:run_live:40+run_done:30"
+run_step inflight true
+marker "old999:run_done:10"
 stop_fake
 start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
 run_step inflight false                # a finished run -> the marker is stale
