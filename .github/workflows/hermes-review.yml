@@ -625,21 +625,26 @@ jobs:
           if [[ "$USE_RUNS" != "true" || "$KIND" != "pr" || "$LEDGER" != "check-run" || -z "$HEAD_SHA" ]]; then
             exit 0
           fi
-          # The newest "Hermes review" check run on the PR's recent commits. The PR's
+          # The newest "Hermes review" marker across the PR's recent commits. The PR's
           # last commits, not just the head: a marker left on an older head IS the
-          # "the head moved while a review was running" signal.
+          # "the head moved while a review was running" signal. `commits(last:5)` answers
+          # OLDEST first and a commit can carry several markers, so neither the commit nor
+          # the marker is taken by position: every marker is flattened and the highest
+          # check-run id (the latest dispatch) wins. The name is filtered server-side and
+          # the suite window is wide, so a busy commit cannot push the marker out of view.
           QUERY=$(cat <<'GQL'
-          query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){commits(last:5){nodes{commit{oid checkSuites(first:20){nodes{checkRuns(first:20){nodes{name externalId status conclusion}}}}}}}}}}
+          query($owner:String!,$repo:String!,$number:Int!,$name:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){commits(last:5){nodes{commit{oid checkSuites(first:100){nodes{checkRuns(first:20,filterBy:{checkName:$name}){nodes{databaseId name externalId}}}}}}}}}}
           GQL
           )
           # `gh api graphql` takes the repository's NAME, not "owner/repo" (the
           # REST paths take the full "owner/repo" as two segments) — passing
           # $REPO here made gh look for "owner/owner/repo".
           REPO_NAME="${REPO#*/}"
+          # shellcheck disable=SC2016  # $oid is a jq variable, not a shell one
           MARKER=$(gh api graphql \
             -f query="$QUERY" \
-            -F owner="$OWNER" -F repo="$REPO_NAME" -F number="$NUMBER" \
-            --jq '[.data.repository.pullRequest.commits.nodes[] | {oid: .commit.oid, runs: [.commit.checkSuites.nodes[].checkRuns.nodes[] | select(.name == env.LEDGER_NAME and .externalId != null and .externalId != "")]} | select(.runs | length > 0) | {oid: .oid, run: .runs[0].externalId}] | first // empty')
+            -F owner="$OWNER" -F repo="$REPO_NAME" -F number="$NUMBER" -f name="$LEDGER_NAME" \
+            --jq '[.data.repository.pullRequest.commits.nodes[] | .commit.oid as $oid | .commit.checkSuites.nodes[].checkRuns.nodes[] | select(.name == env.LEDGER_NAME and .externalId != null and .externalId != "") | {oid: $oid, id: .databaseId, run: .externalId}] | sort_by(.id) | last // empty')
           if [[ -z "$MARKER" ]]; then
             exit 0
           fi
@@ -853,7 +858,7 @@ jobs:
             # -- the stuck base session, which is exactly the id this feature
             # exists to get away from. Sorted by id instead, so the answer does
             # not depend on the endpoint's order.
-            REMEMBERED=$(gh api "repos/$REPO/commits/$BASE_SHA/check-runs?per_page=100" \
+            REMEMBERED=$(gh api "repos/$REPO/commits/$BASE_SHA/check-runs?check_name=$(jq -rn --arg n "$LEDGER_NAME" '$n|@uri')&filter=all&per_page=100" \
               --jq '[.check_runs[] | select(.name == env.LEDGER_NAME) | {id: .id, summary: (.output.summary // "")}] | sort_by(.id) | last | .summary // empty' 2>/dev/null \
               | sed -n 's/^session: //p' | head -1)
             set -e
@@ -942,7 +947,7 @@ jobs:
                 # check runs are where it is.
                 # The NEWEST marker on this head, by id -- the endpoint's own
                 # order is not the contract.
-                MARKER_RUN=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
+                MARKER_RUN=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?check_name=$(jq -rn --arg n "$LEDGER_NAME" '$n|@uri')&filter=all&per_page=100" \
                   --jq '[.check_runs[] | select(.name == env.LEDGER_NAME and .external_id != null and .external_id != "") | {id: .id, run: .external_id}] | sort_by(.id) | last | .run // empty' 2>/dev/null || echo "")
                 if [[ -n "$MARKER_RUN" ]]; then
                   set +e
