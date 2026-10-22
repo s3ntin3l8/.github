@@ -108,6 +108,25 @@ on:
         required: false
         type: string
         default: ''
+      artifact-prefix:
+        description: >-
+          A short prefix that namespaces this caller's shard coverage
+          artifacts, e.g. '-frontend'. The artifacts are named
+          `coverage-shard<prefix>-<n>` and `test-merge` downloads
+          `coverage-shard<prefix>-*`.
+
+          It matters when ONE workflow run calls this reusable workflow more
+          than once with sharding on: artifact names are scoped to the RUN,
+          not to the caller, so two sharded callers both uploading
+          `coverage-shard-1` collide — and `test-merge` then downloads the
+          WRONG map (the other caller's), silently merging two workspaces'
+          coverage into one report. Give each sharded caller its own prefix
+          ('-backend', '-frontend', ...). Empty (the default) keeps today's
+          names exactly, which is correct for the common case of a single
+          sharded caller per run.
+        required: false
+        type: string
+        default: ''
       turbo-cache:
         description: >-
           Cache Turborepo's local cache directories (`**/.turbo` under
@@ -608,7 +627,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: coverage-shard-${{ matrix.shard }}
+          name: coverage-shard${{ inputs.artifact-prefix }}-${{ matrix.shard }}
           path: |
             ${{ inputs.working-directory }}/coverage/coverage-final.json
             ${{ inputs.working-directory }}/junit.xml
@@ -656,9 +675,12 @@ jobs:
           exit 1
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: coverage-shard-*
+          pattern: coverage-shard${{ inputs.artifact-prefix }}-*
           path: ${{ inputs.working-directory }}/.shard-artifacts
       - name: Merge shard coverage
+        env:
+          TEST_SHARDS: ${{ inputs.test-shards }}
+          TEST_SHARD_MATRIX: ${{ inputs.test-shard-matrix }}
         run: |
           mkdir -p .nyc_output coverage
           # Flatten each shard's coverage-final.json into .nyc_output/ under a unique
@@ -668,6 +690,23 @@ jobs:
           done
           if [ -z "$(ls -A .nyc_output 2>/dev/null)" ]; then
             echo "::error::No shard produced coverage/coverage-final.json — ensure the coverage reporter list includes \"json\" (see the test-shards input description)."
+            exit 1
+          fi
+          # Every shard must have contributed EXACTLY one map. A count that
+          # is too low means a shard's artifact was overwritten by another
+          # caller in this run uploading the same artifact name (artifact
+          # names are scoped to the run, not the caller) — which merges the
+          # WRONG workspace's coverage into this report and silently reports
+          # a wrong percentage. A count that is too high means a stray
+          # artifact was picked up by the download pattern. Either way, fail
+          # loudly instead of reporting a number that means nothing.
+          map_count=$(find .shard-artifacts -name coverage-final.json | wc -l | tr -d ' ')
+          expected="$TEST_SHARDS"
+          if [ -n "$TEST_SHARD_MATRIX" ]; then
+            expected=$(printf '%s' "$TEST_SHARD_MATRIX" | jq 'length')
+          fi
+          if [ "$map_count" -ne "$expected" ]; then
+            echo "::error::Expected $expected shard coverage map(s) but found $map_count — a shard artifact is missing, or another caller in this workflow uploaded an artifact with the same name. Give each sharded caller its own 'artifact-prefix'."
             exit 1
           fi
           # --exclude '' neutralizes nyc's own default exclude-glob list (test files,
