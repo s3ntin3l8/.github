@@ -981,13 +981,33 @@ jobs:
               CONFLICT_CODE=$(jq -r '.error.code // "idempotency_key_conflict"' "$RESP" 2>/dev/null || echo idempotency_key_conflict)
               MARKER_RUN=""
               EXISTING_STATUS=""
+              # The marker for this range is on this head, so the head's own
+              # check runs are where it is. The NEWEST marker on this head, by
+              # id -- the endpoint's own order is not the contract.
+              find_marker_run() {
+                gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?check_name=$(jq -rn --arg n "$LEDGER_NAME" '$n|@uri')&filter=all&per_page=100" \
+                  --jq '[.check_runs[] | select(.name == env.LEDGER_NAME and .external_id != null and .external_id != "") | {id: .id, run: .external_id}] | sort_by(.id) | last | .run // empty' 2>/dev/null || echo ""
+              }
               if [[ "$LEDGER" == "check-run" && -n "$HEAD_SHA" ]]; then
-                # The marker for this range is on this head, so the head's own
-                # check runs are where it is.
-                # The NEWEST marker on this head, by id -- the endpoint's own
-                # order is not the contract.
-                MARKER_RUN=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?check_name=$(jq -rn --arg n "$LEDGER_NAME" '$n|@uri')&filter=all&per_page=100" \
-                  --jq '[.check_runs[] | select(.name == env.LEDGER_NAME and .external_id != null and .external_id != "") | {id: .id, run: .external_id}] | sort_by(.id) | last | .run // empty' 2>/dev/null || echo "")
+                MARKER_RUN=$(find_marker_run)
+                # A key conflict with no marker yet usually means the OTHER entry
+                # point (Mullion's relay, or this workflow on another trigger)
+                # dispatched this range a moment ago and has not written its
+                # marker: the marker is written AFTER the dispatch, so the two
+                # can race within the same second (seen live on
+                # mullion-session-manager#1789). Give it a short window before
+                # reporting a failure. An admission_conflict needs no marker, so
+                # it does not wait.
+                if [[ -z "$MARKER_RUN" && "$CONFLICT_CODE" != "admission_conflict" ]]; then
+                  for (( WAIT = 1; WAIT <= ${HERMES_MARKER_WAIT_TRIES:-6}; WAIT++ )); do
+                    sleep "${HERMES_MARKER_WAIT_INTERVAL:-5}"
+                    MARKER_RUN=$(find_marker_run)
+                    [[ -n "$MARKER_RUN" ]] && break
+                  done
+                  if [[ -n "$MARKER_RUN" ]]; then
+                    echo "::notice::Hermes already held a run for this range (HTTP 409: $CONFLICT_CODE); its marker appeared after $WAIT check(s) (Hermes run $MARKER_RUN)."
+                  fi
+                fi
                 if [[ -n "$MARKER_RUN" ]]; then
                   set +e
                   EXISTING_STATUS=$(curl -sS -m 10 "$API_URL/v1/runs/$MARKER_RUN" \
@@ -1032,7 +1052,7 @@ jobs:
                 # No marker names the run the key holds, so we cannot say whether
                 # it is still working — and it is the KEY that conflicts here, so
                 # there is nothing else to try.
-                echo "::error::Hermes holds a run for this range (HTTP 409: $CONFLICT_CODE) but no ledger marker names it, so whether it is still running is unknown — review NOT dispatched. Check the run on hermes-01 before asking again."
+                echo "::error::Hermes holds a run for this range (HTTP 409: $CONFLICT_CODE) but no ledger marker named it within the wait window, so whether it is still running is unknown — review NOT dispatched. Check the run on hermes-01 before asking again."
                 exit 1
               fi
               case "$EXISTING_STATUS" in

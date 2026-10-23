@@ -118,6 +118,13 @@ case "$joined" in
     # (This case must come AFTER the POST and PATCH cases: they match the
     # same path, and a marker listing would answer them with the wrong shape.)
     log "check-runs"
+    # A marker that only appears after FAKE_MARKER_AFTER listings: the other entry
+    # point dispatched a moment ago and has not written it yet.
+    if [[ -n "${FAKE_MARKER_AFTER:-}" ]]; then
+      n=$(( $(cat "${FAKE_MARKER_COUNTER:-/nonexistent}" 2>/dev/null || echo 0) + 1 ))
+      echo "$n" > "${FAKE_MARKER_COUNTER:-/dev/null}"
+      if (( n <= FAKE_MARKER_AFTER )); then echo ""; exit 0; fi
+    fi
     # A second marker on the same commit, so a test can check which one wins:
     # the endpoint answers newest first, so the NEWEST marker is the one the
     # next round has to continue in.
@@ -222,6 +229,7 @@ export API_MODEL="hermes-agent" TARGET_KIND=pr TARGET_NUMBER=42 MODEL="" MAX_TUR
 export PROMPT_FILE="$TMP/prompt.md"; echo "REVIEW PROMPT" > "$PROMPT_FILE"
 export GITHUB_STEP_SUMMARY="$TMP/summary.md"; : > "$GITHUB_STEP_SUMMARY"
 export HERMES_POLL_SECONDS=2
+export HERMES_MARKER_WAIT_INTERVAL=0   # the marker wait must not sleep in tests
 export FAKE_REQUEST_LOG="$TMP/requests.log"; : > "$FAKE_REQUEST_LOG"
 
 echo "== the review scope =="
@@ -495,6 +503,28 @@ start_fake '{"dispatch_codes":[409],"request_log":"'"$TMP"'/requests.log"}'
   && check "a 409 with no marker naming the run fails (not a green unknown)" yes \
   || check "a 409 with no marker naming the run fails (not a green unknown)" no
 stop_fake
+# (3a) the other entry point's marker lands a moment AFTER the 409 (it is written after
+# the dispatch): wait for it, then take the "already running" path instead of failing
+export FAKE_MARKER_RUN="run_live" FAKE_MARKER_AFTER=2 FAKE_MARKER_COUNTER="$TMP/marker.count"; : > "$FAKE_MARKER_COUNTER"
+: > "$TMP/requests.log"
+start_fake '{"run_statuses":{"run_live":"running"},"dispatch_codes":[409],"request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.latemarker" 2>&1; rc=$?
+[[ $rc -eq 0 && $(grep -c '"method": "POST"' "$TMP/requests.log") -eq 1 ]] \
+  && grep -qE "marker appeared after [0-9]+ check" "$TMP/log.latemarker" && grep -q "already running" "$TMP/log.latemarker" \
+  && check "a 409 whose marker lands a moment later waits for it and exits green" yes \
+  || { check "a 409 whose marker lands a moment later waits for it and exits green" no; sed 's/^/        /' "$TMP/log.latemarker" | tail -6; }
+stop_fake
+# the wait is for a key conflict only: an admission_conflict needs no marker and must not wait
+: > "$FAKE_MARKER_COUNTER"; export FAKE_MARKER_AFTER=99
+start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,202],"conflict_code":"admission_conflict","request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.noadmwait" 2>&1
+# one listing is the step's own lookup (the harness lists once before it); a wait would add up to 6 more
+[[ $(cat "$FAKE_MARKER_COUNTER") -le 2 ]] \
+  && check "an admission_conflict does not wait for a marker" yes \
+  || check "an admission_conflict does not wait for a marker" no
+stop_fake
+unset FAKE_MARKER_AFTER FAKE_MARKER_COUNTER
+
 export FAKE_MARKER_RUN="unknown-run"
 start_fake '{"dispatch_codes":[409],"request_log":"'"$TMP"'/requests.log"}'
 ( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.nostatus" 2>&1; rc=$?
