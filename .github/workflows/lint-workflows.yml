@@ -1,9 +1,10 @@
 name: Workflow lint
 
 on:
+  # No `paths:` on pull_request: the branch ruleset requires zizmor's code-scanning
+  # result, so a PR that touches no workflow (a .gitignore tweak) would otherwise
+  # wait on a result that never arrives and could not merge.
   pull_request:
-    paths:
-      - .github/workflows/**
   push:
     branches:
       - main
