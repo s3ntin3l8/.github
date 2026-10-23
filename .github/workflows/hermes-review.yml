@@ -418,6 +418,9 @@ jobs:
           permission-pull-requests: read
           permission-issues: read
           permission-checks: write
+          # The in-flight query reads `pullRequest.commits`; on a PRIVATE repo GraphQL
+          # rejects that ("Resource not accessible by integration") without contents:read.
+          permission-contents: read
 
       # Resolve WHAT was mentioned, so we can route to the right prompt and tell the
       # agent which PR/issue to act on. Uses the runner-side App token (read-only view).
