@@ -281,3 +281,7 @@ These are templates you can copy into your local projects to standardize your de
 
 ## 🛡️ Templates
 - [dependabot.yml](dependabot.yml) - Recommended configuration for weekly dependency updates.
+
+## License
+
+Copyright (C) 2026 Björn Hansen — licensed under [AGPL-3.0-or-later](LICENSE).
