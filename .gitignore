@@ -4,3 +4,6 @@
 
 # Agent workspace / superpowers plans scratch
 docs/superpowers/
+
+# Claude Code local state (plans, settings.local.json)
+.claude/
