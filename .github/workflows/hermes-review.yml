@@ -522,16 +522,36 @@ jobs:
       # Resolve WHAT a review round should cover, and whether the head has already
       # been reviewed.
       #
-      # The bot's LAST LANDED review pins the commit it covered; that commit is the
-      # base of the next round's delta. Two things fall out of that:
+      # The commit the last round covered ("R") is the base of the next round's delta.
+      # Two things fall out of that:
       #
-      #   * If the bot's last review is already on the CURRENT head, nothing changed
-      #     since it reviewed, so there is nothing to do -> skip. This is what stops a
+      #   * If the PR's content at the current head is the content R had, nothing changed
+      #     since it was reviewed, so there is nothing to do -> skip. This is what stops a
       #     storm of "@s3ntin3l8-hermes Review" comments on an unchanged PR from
       #     dispatching a review each time (observed live: 11 mentions on one PR, 21
-      #     queued review turns in one Hermes session).
-      #   * Otherwise the delta is (last reviewed commit)..(current head), so a follow-up
-      #     round reads only what changed instead of the whole diff again.
+      #     queued review turns in one Hermes session). "Same content" is the tree, not
+      #     the SHA: a rebase or a recreated branch that changes nothing still skips, and
+      #     an "Update branch" merge commit, which brings in code nobody reviewed, does not.
+      #   * Otherwise the delta is R..(current head), so a follow-up round reads only what
+      #     changed instead of the whole diff again.
+      #
+      # R is NOT read from `pulls/{n}/reviews[].commit_id` (s3ntin3l8/.github#129):
+      # GitHub re-points an approval's `commit_id` at the PR's CURRENT head when the branch
+      # tip is rewritten (a force-push, "Update branch"), so it is not a record of what
+      # was reviewed. The record that stays put is the ledger: the "Hermes review" check
+      # run sits on the commit it reviewed and does not follow the head. So R is the commit
+      # of the newest ledger marker that
+      #   * ended in SUCCESS (a stopped or failed run reviewed nothing), and
+      #   * is PAIRED with a landed Hermes review submitted at or after the marker started
+      #     (a run can complete without posting a review; dismissing the review retracts
+      #     the pairing, which is the escape hatch for forcing another round).
+      # Without a ledger (the legacy path, `hermes-review-ledger: off`, or no paired
+      # marker) it falls back to the last landed review's `commit_id` -- but only while
+      # that commit is not newer than the review itself; a newer one was re-pointed, so
+      # nothing is known about what was covered and the whole diff is reviewed.
+      # Mullion's relay applies the same rule: both feed the same range into the
+      # idempotency key, so they have to agree or the two entry points stop
+      # deduplicating against each other.
       #
       # Only a PR has a commit to pin; an issue triage (and a caller that asked for
       # "full" scope) has no head, no delta and no "already reviewed" skip.
@@ -546,8 +566,11 @@ jobs:
           REPO: ${{ github.repository }}
           KIND: ${{ steps.target.outputs.kind }}
           NUMBER: ${{ steps.target.outputs.number }}
+          OWNER: ${{ github.repository_owner }}
           SCOPE_MODE: ${{ inputs.hermes-review-scope }}
           BOT_LOGIN: ${{ inputs.mention-trigger }}[bot]
+          LEDGER: ${{ inputs.hermes-review-ledger }}
+          LEDGER_NAME: ${{ inputs.hermes-review-ledger-name }}
         run: |
           set -euo pipefail
           {
@@ -563,10 +586,9 @@ jobs:
             echo "::error::Could not read the head commit of $REPO#$NUMBER — review NOT dispatched."
             exit 1
           fi
-          # The commit the previous round covered: the most recent review by THIS bot
-          # (BOT_LOGIN, the same identity the re-trigger guard above uses) that actually
-          # LANDED -- APPROVED / CHANGES_REQUESTED / COMMENTED. A PENDING (draft) review
-          # never landed and a DISMISSED one was retracted.
+          # Hermes' landed reviews: APPROVED / CHANGES_REQUESTED / COMMENTED by THIS bot
+          # (BOT_LOGIN, the same identity the re-trigger guard above uses). A PENDING
+          # (draft) review never landed and a DISMISSED one was retracted.
           #
           # Only Hermes' own reviews count. A review by another bot (claude[bot], Copilot,
           # a Task Master reviewer) landing on the head must neither make an explicit
@@ -576,13 +598,61 @@ jobs:
           # idempotency key; s3ntin3l8/.github#99 narrowed it, and the relay must follow
           # or the two entry points stop deduplicating against each other.)
           # `env.BOT_LOGIN` rather than `--arg`: `gh api --jq` takes exactly one argument.
-          LAST_REVIEWED=$(gh api "repos/$REPO/pulls/$NUMBER/reviews" \
-            --jq '[.[] | select(.user.login == env.BOT_LOGIN and (.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED")) | .commit_id] | last // empty')
+          REVIEWS=$(gh api "repos/$REPO/pulls/$NUMBER/reviews?per_page=100" \
+            --jq '[.[] | select(.user.login == env.BOT_LOGIN and (.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED")) | {commit_id, submitted_at}]' 2>/dev/null || echo "")
+          [[ -n "$REVIEWS" ]] || REVIEWS='[]'
           echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
-          if [[ -n "$LAST_REVIEWED" && "$LAST_REVIEWED" == "$HEAD_SHA" ]]; then
-            echo "::notice::a review of $REPO#$NUMBER already landed at $HEAD_SHA — the head has not moved since, so there is nothing new to review; skipping. Push a new commit to ask for another round (or dismiss that review first)."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
+          LAST_REVIEWED=""
+          # 1. The ledger: the newest SUCCESS marker paired with a landed review. The
+          # PR's last commits, not just the head -- the marker sits on the commit that was
+          # reviewed, which is an older one once the head has moved. A read that fails
+          # (no `checks: read`, no ledger) is the same as no marker.
+          if [[ "$LEDGER" == "check-run" ]]; then
+            QUERY=$(cat <<'GQL'
+          query($owner:String!,$repo:String!,$number:Int!,$name:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){commits(last:50){nodes{commit{oid checkSuites(first:100){nodes{checkRuns(first:20,filterBy:{checkName:$name}){nodes{databaseId name externalId status conclusion startedAt}}}}}}}}}}
+          GQL
+            )
+            MARKERS=$(gh api graphql \
+              -f query="$QUERY" \
+              -F owner="$OWNER" -F repo="${REPO#*/}" -F number="$NUMBER" -f name="$LEDGER_NAME" \
+              --jq '[.data.repository.pullRequest.commits.nodes[] | .commit.oid as $oid | .commit.checkSuites.nodes[].checkRuns.nodes[] | select(.name == env.LEDGER_NAME and .conclusion == "SUCCESS" and .startedAt != null) | {oid: $oid, id: .databaseId, started: .startedAt}]' 2>/dev/null || echo "")
+            [[ -n "$MARKERS" ]] || MARKERS='[]'
+            # Paired: a landed review was submitted at or after the marker started. The
+            # timestamps are all ISO-8601 UTC, so they compare as strings.
+            LAST_REVIEWED=$(jq -r --argjson reviews "$REVIEWS" \
+              '[.[] | select(.started as $s | any($reviews[]; .submitted_at >= $s))] | sort_by(.id) | last | .oid // empty' <<< "$MARKERS")
+          fi
+          # 2. No ledger answer: the last landed review's commit_id -- trusted only while
+          # that commit is not newer than the review. GitHub re-points an approval's
+          # commit_id at the current head when the branch is rewritten (#129), and that
+          # re-pointed commit was committed after the review was submitted.
+          if [[ -z "$LAST_REVIEWED" ]]; then
+            CANDIDATE=$(jq -r 'last | .commit_id // empty' <<< "$REVIEWS")
+            if [[ -n "$CANDIDATE" ]]; then
+              REVIEWED_AT=$(jq -r 'last | .submitted_at // empty' <<< "$REVIEWS")
+              COMMITTED_AT=$(gh api "repos/$REPO/commits/$CANDIDATE" --jq '.commit.committer.date' 2>/dev/null || echo "")
+              if [[ -n "$COMMITTED_AT" && -n "$REVIEWED_AT" && ! "$COMMITTED_AT" > "$REVIEWED_AT" ]]; then
+                LAST_REVIEWED="$CANDIDATE"
+              else
+                echo "::notice::the last review's commit_id ($CANDIDATE) is not a reliable record of what it covered (GitHub re-points it when the branch is rewritten) and no ledger marker names the reviewed commit; the whole diff will be reviewed."
+              fi
+            fi
+          fi
+          if [[ -n "$LAST_REVIEWED" ]]; then
+            if [[ "$LAST_REVIEWED" == "$HEAD_SHA" ]]; then
+              SAME=yes
+            else
+              # Same content = same tree. A tree that cannot be read is not "the same".
+              TREE_REVIEWED=$(gh api "repos/$REPO/commits/$LAST_REVIEWED" --jq '.commit.tree.sha' 2>/dev/null || echo "")
+              TREE_HEAD=$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq '.commit.tree.sha' 2>/dev/null || echo "")
+              SAME=no
+              if [[ -n "$TREE_REVIEWED" && "$TREE_REVIEWED" == "$TREE_HEAD" ]]; then SAME=yes; fi
+            fi
+            if [[ "$SAME" == "yes" ]]; then
+              echo "::notice::a review of $REPO#$NUMBER already covers this content (reviewed commit $LAST_REVIEWED, head $HEAD_SHA) — nothing new to review; skipping. Push a change to ask for another round, or dismiss that review first: gh api -X PUT repos/$REPO/pulls/$NUMBER/reviews/<review id>/dismissals -f message='re-review'."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
           echo "base=$LAST_REVIEWED" >> "$GITHUB_OUTPUT"
           if [[ -n "$LAST_REVIEWED" ]]; then
@@ -1063,13 +1133,21 @@ jobs:
                   ;;
                 completed|failed|cancelled|interrupted)
                   if [[ "$EXISTING_STATUS" == "completed" && "$TARGET_KIND" == "pr" && -n "$HEAD_SHA" ]]; then
-                    # It finished. If Hermes' own review of THIS head landed, there is nothing
-                    # to redo: a deeper key would dispatch a second review of the same commit
-                    # (the same rule the scope step applies before dispatching).
-                    LANDED=$(gh api "repos/$REPO/pulls/$TARGET_NUMBER/reviews" \
-                      --jq '[.[] | select(.user.login == env.BOT_LOGIN and .commit_id == env.HEAD_SHA and (.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED"))] | length' 2>/dev/null || echo 0)
+                    # It finished. If a Hermes review landed while that run was working,
+                    # there is nothing to redo: a deeper key would dispatch a second review
+                    # of the same commit (the same rule the scope step applies before
+                    # dispatching). "Landed while it was working" is a review submitted at
+                    # or after the marker started -- NOT a review whose commit_id is this
+                    # head, which GitHub re-points when the branch is rewritten (#129).
+                    MARKER_STARTED=$(MARKER_RUN="$MARKER_RUN" gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?check_name=$(jq -rn --arg n "$LEDGER_NAME" '$n|@uri')&filter=all&per_page=100" \
+                      --jq '[.check_runs[] | select(.external_id == env.MARKER_RUN) | .started_at] | first // empty' 2>/dev/null || echo "")
+                    LANDED=0
+                    if [[ -n "$MARKER_STARTED" ]]; then
+                      LANDED=$(MARKER_STARTED="$MARKER_STARTED" gh api "repos/$REPO/pulls/$TARGET_NUMBER/reviews?per_page=100" \
+                        --jq '[.[] | select(.user.login == env.BOT_LOGIN and .submitted_at >= env.MARKER_STARTED and (.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED"))] | length' 2>/dev/null || echo 0)
+                    fi
                     if [[ "${LANDED:-0}" != "0" ]]; then
-                      echo "::notice::the run Hermes held for this range completed and its review of $HEAD_SHA already landed — not dispatching another."
+                      echo "::notice::the run Hermes held for this range completed and its review already landed — not dispatching another."
                       exit 0
                     fi
                   fi
