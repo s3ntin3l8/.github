@@ -530,8 +530,12 @@ jobs:
       #     storm of "@s3ntin3l8-hermes Review" comments on an unchanged PR from
       #     dispatching a review each time (observed live: 11 mentions on one PR, 21
       #     queued review turns in one Hermes session). "Same content" is the tree, not
-      #     the SHA: a rebase or a recreated branch that changes nothing still skips, and
-      #     an "Update branch" merge commit, which brings in code nobody reviewed, does not.
+      #     the SHA: a rewrite that leaves the reviewed commit in the PR and changes
+      #     nothing still skips, and an "Update branch" merge commit, which brings in
+      #     code nobody reviewed, does not. A rewrite that DROPS the reviewed commit from
+      #     the PR (a force-push, a rebase) hides its marker, because markers are read
+      #     from the PR's current commits only: the round then reviews again (a redundant
+      #     review, never a skipped one; s3ntin3l8/.github#136).
       #   * Otherwise the delta is R..(current head), so a follow-up round reads only what
       #     changed instead of the whole diff again.
       #
@@ -623,15 +627,25 @@ jobs:
               --jq '[.data.repository.pullRequest.commits.nodes[] | .commit.oid as $oid | .commit.checkSuites.nodes[].checkRuns.nodes[] | select(.name == env.LEDGER_NAME and .conclusion == "SUCCESS" and .startedAt != null and .completedAt != null) | {oid: $oid, id: .databaseId, started: .startedAt, completed: .completedAt}]' 2>/dev/null || echo "")
             [[ -n "$MARKERS" ]] || MARKERS='[]'
             # Paired: a landed review was submitted WHILE THE RUN RAN -- between the
-            # marker's start and its close (s3ntin3l8/.github#133). With a lower bound
-            # only, ANY later review paired every older success marker, so a run that
-            # posted nothing could be picked as the base by an unrelated review: a base
-            # that is too NEW, which skips code nobody reviewed. 60 s of slack after the
-            # close, because the marker is closed from a different clock than GitHub
-            # stamps the review with (Mullion's relay uses the same slack). Timestamps
-            # are ISO-8601 UTC; one that does not parse (start, review or close) counts as "not in the window": the start defaults to infinity, never to 0, which would make the lower bound vacuous.
+            # marker's start and the earlier of (its close + 60 s) and (its start + 90
+            # min). With a lower bound only (s3ntin3l8/.github#133), ANY later review
+            # paired every older success marker, so a run that posted nothing could be
+            # picked as the base by an unrelated review: a base that is too NEW, which
+            # skips code nobody reviewed. The close is only as good as whoever wrote
+            # it: a marker is closed with "now" by whoever sees the run finish (a
+            # status read, a later request), possibly hours after it ended, so the
+            # close alone does not bound a silent run. No run outlives the 60 min job
+            # timeout by much, so 90 min caps it (a genuine run past the cap just falls
+            # back to the commit_id rule or a full review, the safe direction). The 60 s
+            # of slack is for the clock the marker is closed from (the runner's, not
+            # GitHub's). Mullion's relay MUST use the same slack and cap: both put the
+            # base into one idempotency key, and a relay that pairs a marker this refuses
+            # (or the reverse) derives a different base. Timestamps are
+            # ISO-8601 UTC; one that does not parse (start, review or close) counts as
+            # "not in the window": the start defaults to infinity, never to 0, which
+            # would make the lower bound vacuous.
             LAST_REVIEWED=$(jq -r --argjson reviews "$REVIEWS" \
-              '[.[] | select(.started as $s | .completed as $c | any($reviews[]; ((.submitted_at | try fromdate catch -1) >= ($s | try fromdate catch infinite)) and ((.submitted_at | try fromdate catch -1) <= (($c | try fromdate catch 0) + 60))))] | sort_by(.id) | last | .oid // empty' <<< "$MARKERS")
+              '[.[] | select(.started as $s | .completed as $c | any($reviews[]; ((.submitted_at | try fromdate catch -1) >= ($s | try fromdate catch infinite)) and ((.submitted_at | try fromdate catch -1) <= ([(($c | try fromdate catch 0) + 60), (($s | try fromdate catch infinite) + 5400)] | min))))] | sort_by(.id) | last | .oid // empty' <<< "$MARKERS")
           fi
           # 2. No ledger answer: the last landed review's commit_id -- trusted only while
           # that commit is not newer than the review. GitHub re-points an approval's
