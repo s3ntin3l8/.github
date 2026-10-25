@@ -74,7 +74,7 @@ Read these from the message you were given. Do not ask the human for them.
      ```bash
      git fetch --unshallow origin 2>/dev/null || git fetch origin
      git fetch origin "$BASE_REF:refs/remotes/origin/$BASE_REF"
-     git fetch origin "<base>" 2>/dev/null   # gone after a rebase: see the fallback below
+     git fetch origin "<base>" 2>/dev/null || true   # gone after a rebase: see the fallback below
      git log -p --remerge-diff --reverse "<base>..$HEAD_SHA" "^origin/$BASE_REF"
      ```
      Excluding `origin/$BASE_REF` leaves the PR's own commits since `<base>`.
