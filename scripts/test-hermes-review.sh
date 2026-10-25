@@ -292,7 +292,7 @@ echo "== the review scope: the reviewed commit comes from the ledger (#129) =="
 # still knows what was reviewed.
 export FAKE_HEAD="head111" FAKE_LAST_REVIEWED="head111" FAKE_REVIEW_AT="2026-01-02T00:00:00Z"
 export FAKE_COMMIT_DATES="head111=2026-01-03T00:00:00Z"
-marker "old999:run_a:10:COMPLETED@2026-01-01T12:00:00Z" "head111"
+marker "old999:run_a:10:COMPLETED@2026-01-01T23:30:00Z" "head111"
 run_step scope false
 base_is "old999" && check "scope: a re-pointed commit_id does not skip; the base is the ledger's commit" yes || check "scope: a re-pointed commit_id does not skip; the base is the ledger's commit" no
 # Same content under a new SHA (a rebase or a recreated branch): nothing new to review.
@@ -300,12 +300,12 @@ export FAKE_TREES="old999=treeX head111=treeX"
 run_step scope true
 unset FAKE_TREES
 # A marker whose run was stopped or failed reviewed nothing.
-marker "old999:run_a:10:COMPLETED/CANCELLED@2026-01-01T12:00:00Z" "head111"
+marker "old999:run_a:10:COMPLETED/CANCELLED@2026-01-01T23:30:00Z" "head111"
 run_step scope false
 base_is "" && check "scope: a cancelled marker is not a reviewed commit" yes || check "scope: a cancelled marker is not a reviewed commit" no
 # A run that completed but posted no review (none submitted after it started) did not
 # review anything either, so the older paired marker wins.
-marker "old999:run_a:10:COMPLETED@2026-01-01T12:00:00Z" "mid555:run_b:20:COMPLETED@2026-01-05T00:00:00Z" "head111"
+marker "old999:run_a:10:COMPLETED@2026-01-01T23:30:00Z" "mid555:run_b:20:COMPLETED@2026-01-05T00:00:00Z" "head111"
 run_step scope false
 base_is "old999" && check "scope: an unpaired success marker falls back to the older paired one" yes || check "scope: an unpaired success marker falls back to the older paired one" no
 # A review that predates the marker was not that run's review (a dismissed one is gone from
@@ -352,6 +352,24 @@ marker "old999:run_a:10:COMPLETED@not-a-time>2026-01-01T10:30:00Z" "head111"
 export FAKE_REVIEW_AT="2025-12-01T00:00:00Z" FAKE_COMMIT_DATES="head111=2026-01-03T00:00:00Z"
 run_step scope false
 base_is "" && check "scope: a marker with an unparseable start never pairs" yes || check "scope: a marker with an unparseable start never pairs" no
+# A marker is closed with "now" by whoever sees the run finish, possibly hours late, so the
+# close alone does not bound a SILENT run: it must also be capped at 90 min after its start.
+# Run A (10:00-10:30) posted the review at 10:20. Run B (11:00) posted nothing and was closed
+# at 17:00. An unrelated review at 13:00 (a run whose marker was never written) is neither's.
+export FAKE_REVIEW_AT="2026-01-01T10:20:00Z" FAKE_REVIEW2_AT="2026-01-01T13:00:00Z"
+marker "old999:run_a:10:COMPLETED@2026-01-01T10:00:00Z>2026-01-01T10:30:00Z" "mid555:run_b:20:COMPLETED@2026-01-01T11:00:00Z>2026-01-01T17:00:00Z" "head111"
+run_step scope false
+base_is "old999" && check "scope: a silent marker closed hours late does not pair an unrelated review" yes || check "scope: a silent marker closed hours late does not pair an unrelated review" no
+# ...but a genuine run closed just as late still pairs its own review.
+unset FAKE_REVIEW2_AT
+export FAKE_REVIEW_AT="2026-01-01T11:20:00Z"
+run_step scope false
+base_is "mid555" && check "scope: a late-closed marker still pairs a review from inside its run" yes || check "scope: a late-closed marker still pairs a review from inside its run" no
+# Past the 90 min cap a review is not the run's, whatever the close says.
+marker "old999:run_a:10:COMPLETED@2026-01-01T10:00:00Z>2026-01-01T23:00:00Z" "head111"
+export FAKE_REVIEW_AT="2026-01-01T11:35:00Z" FAKE_COMMIT_DATES="head111=2026-01-03T00:00:00Z"
+run_step scope false
+base_is "" && check "scope: a review past the 90 min cap is not the run's" yes || check "scope: a review past the 90 min cap is not the run's" no
 unset FAKE_REVIEW_AT FAKE_COMMIT_DATES
 export FAKE_LAST_REVIEWED=""
 
