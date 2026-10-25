@@ -67,11 +67,15 @@ case "$joined" in
     # A real review list, run through the workflow's own --jq filter, so the
     # filter is exercised here and not only in a consumer run.
     log "reviews"
+    [[ -n "${FAKE_REVIEWS_FAIL:-}" ]] && exit 1
     # Hermes' own review at FAKE_LAST_REVIEWED, plus (optionally) another bot's review
     # at FAKE_OTHER_BOT_REVIEWED, which must never count (s3ntin3l8/.github#99).
-    reviews='[{"user":{"type":"Bot","login":"s3ntin3l8-hermes[bot]"},"state":"APPROVED","commit_id":"'"${FAKE_LAST_REVIEWED:-}"'"}'
+    # FAKE_LAST_REVIEWED is the commit_id the review REPORTS now (GitHub re-points an
+    # approval's at the head when the branch is rewritten, #129); FAKE_REVIEW_AT is when
+    # it was submitted.
+    reviews='[{"user":{"type":"Bot","login":"s3ntin3l8-hermes[bot]"},"state":"APPROVED","commit_id":"'"${FAKE_LAST_REVIEWED:-}"'","submitted_at":"'"${FAKE_REVIEW_AT:-2026-01-02T00:00:00Z}"'"}'
     if [[ -n "${FAKE_OTHER_BOT_REVIEWED:-}" ]]; then
-      reviews+=',{"user":{"type":"Bot","login":"claude[bot]"},"state":"COMMENTED","commit_id":"'"${FAKE_OTHER_BOT_REVIEWED}"'"}'
+      reviews+=',{"user":{"type":"Bot","login":"claude[bot]"},"state":"COMMENTED","commit_id":"'"${FAKE_OTHER_BOT_REVIEWED}"'","submitted_at":"2026-01-02T00:00:00Z"}'
     fi
     reviews+=']'
     filter=""
@@ -132,7 +136,7 @@ case "$joined" in
     if [[ -n "${FAKE_MARKER2_SESSION:-}" ]]; then
       second=',{"id":'"${FAKE_MARKER2_ID:-800}"',"name":"'"${LEDGER_NAME:-Hermes review}"'","external_id":"'"${FAKE_MARKER2_RUN-run_old}"'","output":{"summary":"session: '"$FAKE_MARKER2_SESSION"'"}}'
     fi
-    runs='{"total_count":2,"check_runs":[{"id":'"${FAKE_MARKER_ID:-900}"',"name":"'"${LEDGER_NAME:-Hermes review}"'","external_id":"'"${FAKE_MARKER_RUN-run_dead}"'","output":{"summary":"'"${FAKE_MARKER_SESSION:+session: $FAKE_MARKER_SESSION}"'"}}'"$second"']}'
+    runs='{"total_count":2,"check_runs":[{"id":'"${FAKE_MARKER_ID:-900}"',"name":"'"${LEDGER_NAME:-Hermes review}"'","external_id":"'"${FAKE_MARKER_RUN-run_dead}"'","started_at":"'"${FAKE_MARKER_STARTED:-2026-01-01T00:00:00Z}"'","output":{"summary":"'"${FAKE_MARKER_SESSION:+session: $FAKE_MARKER_SESSION}"'"}}'"$second"']}'
     filter=""
     prev=""
     for a in "${args[@]}"; do
@@ -145,6 +149,22 @@ case "$joined" in
     else
       printf '%s' "$payload"
     fi
+    exit 0 ;;
+  *"/commits/"*)
+    # A commit: its tree and its committer date. FAKE_TREES / FAKE_COMMIT_DATES are
+    # space-separated "sha=value" lists; anything unlisted gets "tree-<sha>" and a date
+    # before the default review time. FAKE_COMMIT_MISSING makes the commit unreadable.
+    sha=""
+    for a in "${args[@]}"; do [[ "$a" == repos/*/commits/* ]] && sha=${a##*/}; done
+    log "commit $sha"
+    for m in ${FAKE_COMMIT_MISSING:-}; do [[ "$m" == "$sha" ]] && exit 1; done
+    tree="tree-$sha"; date="2026-01-01T00:00:00Z"
+    for kv in ${FAKE_TREES:-}; do [[ "${kv%%=*}" == "$sha" ]] && tree=${kv#*=}; done
+    for kv in ${FAKE_COMMIT_DATES:-}; do [[ "${kv%%=*}" == "$sha" ]] && date=${kv#*=}; done
+    commit='{"commit":{"tree":{"sha":"'"$tree"'"},"committer":{"date":"'"$date"'"}}}'
+    filter=""; prev=""
+    for a in "${args[@]}"; do [[ "$prev" == "--jq" ]] && filter="$a"; prev="$a"; done
+    if [[ -n "$filter" ]]; then printf '%s' "$commit" | jq -r "$filter" 2>/dev/null || echo ""; else printf '%s' "$commit"; fi
     exit 0 ;;
 esac
 exit 0
@@ -205,10 +225,15 @@ marker() {
     if [[ -n "$rest" ]]; then
       IFS=+ read -ra ms <<< "$rest"
       for m in "${ms[@]}"; do
-        # "run:id" or "run:id:state" (state = IN_PROGRESS|COMPLETED; default IN_PROGRESS)
-        local mrun=${m%%:*} mrest=${m#*:} mid mstate=IN_PROGRESS
+        # "run:id" or "run:id:state" (state = IN_PROGRESS|COMPLETED; default IN_PROGRESS),
+        # optionally "state/CONCLUSION" (default SUCCESS once COMPLETED) and a trailing
+        # "@<iso time>" for when the run started (default 2026-01-01T00:00:00Z).
+        local mrun=${m%%:*} mrest=${m#*:} mid mstate=IN_PROGRESS mconc=null mat=2026-01-01T00:00:00Z
+        if [[ "$mrest" == *@* ]]; then mat=${mrest#*@}; mrest=${mrest%%@*}; fi
         mid=${mrest%%:*}; [[ "$mrest" == *:* ]] && mstate=${mrest#*:}
-        runs+="${runs:+,}"'{"databaseId":'"$mid"',"name":"Hermes review","externalId":"'"$mrun"'","status":"'"$mstate"'"}'
+        if [[ "$mstate" == */* ]]; then mconc='"'${mstate#*/}'"'; mstate=${mstate%%/*}
+        elif [[ "$mstate" == COMPLETED ]]; then mconc='"SUCCESS"'; fi
+        runs+="${runs:+,}"'{"databaseId":'"$mid"',"name":"Hermes review","externalId":"'"$mrun"'","status":"'"$mstate"'","conclusion":'"$mconc"',"startedAt":"'"$mat"'"}'
       done
     fi
     nodes+="${nodes:+,}"'{"commit":{"oid":"'"$oid"'","checkSuites":{"nodes":[{"checkRuns":{"nodes":['"$runs"']}}]}}}'
@@ -248,6 +273,47 @@ grep -q '^base=$' "$TMP/out.scope" && check "scope: another bot's review sets no
 export FAKE_LAST_REVIEWED="old999"
 run_step scope false
 grep -q '^base=old999$' "$TMP/out.scope" && check "scope: the base stays Hermes' own review" yes || check "scope: the base stays Hermes' own review" no
+export FAKE_LAST_REVIEWED="" FAKE_OTHER_BOT_REVIEWED=""
+
+echo "== the review scope: the reviewed commit comes from the ledger (#129) =="
+# The #129 shape: the approval was submitted against old999, a merge commit has since been
+# pushed, and GitHub re-pointed the review's commit_id at the new head. Only the ledger
+# still knows what was reviewed.
+export FAKE_HEAD="head111" FAKE_LAST_REVIEWED="head111" FAKE_REVIEW_AT="2026-01-02T00:00:00Z"
+export FAKE_COMMIT_DATES="head111=2026-01-03T00:00:00Z"
+marker "old999:run_a:10:COMPLETED@2026-01-01T12:00:00Z" "head111"
+run_step scope false
+grep -q '^base=old999$' "$TMP/out.scope" && check "scope: a re-pointed commit_id does not skip; the base is the ledger's commit" yes || check "scope: a re-pointed commit_id does not skip; the base is the ledger's commit" no
+# Same content under a new SHA (a rebase or a recreated branch): nothing new to review.
+export FAKE_TREES="old999=treeX head111=treeX"
+run_step scope true
+unset FAKE_TREES
+# A marker whose run was stopped or failed reviewed nothing.
+marker "old999:run_a:10:COMPLETED/CANCELLED@2026-01-01T12:00:00Z" "head111"
+run_step scope false
+grep -q '^base=$' "$TMP/out.scope" && check "scope: a cancelled marker is not a reviewed commit" yes || check "scope: a cancelled marker is not a reviewed commit" no
+# A run that completed but posted no review (none submitted after it started) did not
+# review anything either, so the older paired marker wins.
+marker "old999:run_a:10:COMPLETED@2026-01-01T12:00:00Z" "mid555:run_b:20:COMPLETED@2026-01-05T00:00:00Z" "head111"
+run_step scope false
+grep -q '^base=old999$' "$TMP/out.scope" && check "scope: an unpaired success marker falls back to the older paired one" yes || check "scope: an unpaired success marker falls back to the older paired one" no
+# A review that predates the marker was not that run's review (a dismissed one is gone from
+# the landed list altogether), so the marker pairs with nothing and nothing is skipped.
+marker "head111:run_a:10:COMPLETED@2026-01-01T12:00:00Z"
+export FAKE_REVIEW_AT="2025-12-01T00:00:00Z" FAKE_LAST_REVIEWED=""
+run_step scope false
+grep -q '^base=$' "$TMP/out.scope" && check "scope: a review that predates the marker does not pair with it" yes || check "scope: a review that predates the marker does not pair with it" no
+# No ledger at all and a commit_id newer than the review: it was re-pointed, so the whole
+# diff is reviewed rather than trusting it.
+rm -f "$TMP/marker.json"; unset FAKE_MARKER_FILE
+export FAKE_LAST_REVIEWED="head111" FAKE_REVIEW_AT="2026-01-02T00:00:00Z" FAKE_COMMIT_DATES="head111=2026-01-03T00:00:00Z"
+run_step scope false
+grep -q '^base=$' "$TMP/out.scope" && check "scope: a commit_id newer than its review is not trusted without a ledger" yes || check "scope: a commit_id newer than its review is not trusted without a ledger" no
+# ...and an unreadable commit is not trusted either.
+export FAKE_COMMIT_DATES="" FAKE_COMMIT_MISSING="head111" FAKE_LAST_REVIEWED="old999"
+run_step scope false
+grep -q '^base=$' "$TMP/out.scope" && check "scope: an unreadable commit_id is not trusted without a ledger" yes || check "scope: an unreadable commit_id is not trusted without a ledger" no
+unset FAKE_COMMIT_MISSING FAKE_REVIEW_AT FAKE_COMMIT_DATES
 export FAKE_LAST_REVIEWED="" FAKE_OTHER_BOT_REVIEWED=""
 
 echo "== the in-flight marker =="
@@ -542,14 +608,29 @@ start_fake '{"run_statuses":{"run_done":"completed"},"dispatch_codes":[409,202],
   && check "a completed run whose review landed at this head is not redispatched" yes \
   || { check "a completed run whose review landed at this head is not redispatched" no; sed 's/^/        /' "$TMP/log.landed" | tail -4; }
 stop_fake
-export FAKE_LAST_REVIEWED="old999"
+# ...a review that predates the run is not that run's review (its commit_id is irrelevant:
+# GitHub re-points an approval's at the head, #129)
+export FAKE_LAST_REVIEWED="head111" FAKE_REVIEW_AT="2025-12-31T00:00:00Z"
 : > "$TMP/requests.log"
 start_fake '{"run_statuses":{"run_done":"completed"},"dispatch_codes":[409,202],"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
 ( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.notlanded" 2>&1
 [[ $(grep -c '"method": "POST"' "$TMP/requests.log") -eq 2 ]] \
-  && check "a completed run with no review at this head is retried under a deeper key" yes \
-  || check "a completed run with no review at this head is retried under a deeper key" no
+  && check "a completed run whose review predates it is retried under a deeper key" yes \
+  || check "a completed run whose review predates it is retried under a deeper key" no
 stop_fake
+unset FAKE_REVIEW_AT
+
+# (4b) a completed run whose reviews cannot be read: unknown, so nothing is dispatched
+# and the step does not report success (a failed read once counted as "a review landed")
+export FAKE_LAST_REVIEWED="head111" FAKE_MARKER_RUN="run_done" FAKE_REVIEWS_FAIL=1
+: > "$TMP/requests.log"
+start_fake '{"run_statuses":{"run_done":"completed"},"dispatch_codes":[409,202],"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.reviewsfail" 2>&1; rc=$?
+[[ $rc -ne 0 && $(grep -c '"method": "POST"' "$TMP/requests.log") -eq 1 ]] && grep -q "NOT dispatched" "$TMP/log.reviewsfail" && ! grep -q "already landed" "$TMP/log.reviewsfail" \
+  && check "an unreadable reviews list is not read as a landed review" yes \
+  || { check "an unreadable reviews list is not read as a landed review" no; sed 's/^/        /' "$TMP/log.reviewsfail" | tail -4; }
+stop_fake
+unset FAKE_REVIEWS_FAIL
 
 # (5) response files do not outlive the step
 export FAKE_LAST_REVIEWED="" FAKE_MARKER_RUN="run_dead"
