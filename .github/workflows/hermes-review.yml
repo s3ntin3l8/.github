@@ -1149,8 +1149,16 @@ jobs:
                     LANDED=0
                     if [[ -n "$MARKER_STARTED" ]]; then
                       # One line per matching review, counted: the filter runs per page.
-                      LANDED=$(MARKER_STARTED="$MARKER_STARTED" gh api --paginate "repos/$REPO/pulls/$TARGET_NUMBER/reviews?per_page=100" \
-                        --jq '.[] | select(.user.login == env.BOT_LOGIN and .submitted_at >= env.MARKER_STARTED and (.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED")) | "landed"' 2>/dev/null | wc -l || echo 0)
+                      # A failed read is NOT "no review landed" and NOT "one landed": we do
+                      # not know, so -- like the unreadable-status branch below -- dispatch
+                      # nothing and say so (a `| wc -l || echo 0` here printed "0" twice on a
+                      # failure, which the check below read as "a review landed", exit 0).
+                      if ! LANDED_LINES=$(MARKER_STARTED="$MARKER_STARTED" gh api --paginate "repos/$REPO/pulls/$TARGET_NUMBER/reviews?per_page=100" \
+                        --jq '.[] | select(.user.login == env.BOT_LOGIN and .submitted_at >= env.MARKER_STARTED and (.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED")) | "landed"' 2>/dev/null); then
+                        echo "::error::Hermes' run for this range completed (run $MARKER_RUN), but the pull request's reviews could not be read, so whether its review landed is unknown — review NOT dispatched. Check the PR and ask again."
+                        exit 1
+                      fi
+                      LANDED=$(printf '%s\n' "$LANDED_LINES" | grep -c landed || true)
                     fi
                     if [[ "${LANDED:-0}" != "0" ]]; then
                       echo "::notice::the run Hermes held for this range completed and its review already landed — not dispatching another."

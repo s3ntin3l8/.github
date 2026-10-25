@@ -67,6 +67,7 @@ case "$joined" in
     # A real review list, run through the workflow's own --jq filter, so the
     # filter is exercised here and not only in a consumer run.
     log "reviews"
+    [[ -n "${FAKE_REVIEWS_FAIL:-}" ]] && exit 1
     # Hermes' own review at FAKE_LAST_REVIEWED, plus (optionally) another bot's review
     # at FAKE_OTHER_BOT_REVIEWED, which must never count (s3ntin3l8/.github#99).
     # FAKE_LAST_REVIEWED is the commit_id the review REPORTS now (GitHub re-points an
@@ -618,6 +619,18 @@ start_fake '{"run_statuses":{"run_done":"completed"},"dispatch_codes":[409,202],
   || check "a completed run whose review predates it is retried under a deeper key" no
 stop_fake
 unset FAKE_REVIEW_AT
+
+# (4b) a completed run whose reviews cannot be read: unknown, so nothing is dispatched
+# and the step does not report success (a failed read once counted as "a review landed")
+export FAKE_LAST_REVIEWED="head111" FAKE_MARKER_RUN="run_done" FAKE_REVIEWS_FAIL=1
+: > "$TMP/requests.log"
+start_fake '{"run_statuses":{"run_done":"completed"},"dispatch_codes":[409,202],"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.reviewsfail" 2>&1; rc=$?
+[[ $rc -ne 0 && $(grep -c '"method": "POST"' "$TMP/requests.log") -eq 1 ]] && grep -q "NOT dispatched" "$TMP/log.reviewsfail" && ! grep -q "already landed" "$TMP/log.reviewsfail" \
+  && check "an unreadable reviews list is not read as a landed review" yes \
+  || { check "an unreadable reviews list is not read as a landed review" no; sed 's/^/        /' "$TMP/log.reviewsfail" | tail -4; }
+stop_fake
+unset FAKE_REVIEWS_FAIL
 
 # (5) response files do not outlive the step
 export FAKE_LAST_REVIEWED="" FAKE_MARKER_RUN="run_dead"
