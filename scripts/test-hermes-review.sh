@@ -637,18 +637,24 @@ grep -q 'FOLLOW-UP round' "$TMP/requests.log" && grep -q 'EXCLUDING the commits 
 stop_fake
 export BASE_SHA=""
 # The command the review prompt gives, run against a real history: a PR that took
-# "Update branch" (main merged in, with a conflict resolved by hand).
+# "Update branch" (main merged in) with three conflicts, finished the three ways a
+# conflict is finished: typing new text, taking the PR's side (--ours) and taking main's
+# (--theirs). A combined diff (--cc) only shows the first; the other two are exactly
+# what silently drops the PR's change or reverts main's fix.
 CMD=$(grep -m1 '^     git log -p' "$ROOT/hermes-review-prompt.md" | sed 's/^ *//')
 G="$TMP/git-delta"; mkdir -p "$G"
 (
   cd "$G" && git init -q -b main . && git config user.email t@t && git config user.name t
-  echo a > a.txt; echo shared > s.txt; git add .; git commit -qm base
+  for f in typed ours theirs; do printf 'l1\nl2\nl3\n' > "$f.txt"; done
+  git add .; git commit -qm base
   git checkout -qb pr; echo pr1 > p1.txt; git add .; git commit -qm pr1
   git rev-parse HEAD > "$TMP/git-r"
   git checkout -q main; echo m1 > m1.txt; git add .; git commit -qm main1
-  echo shared-main > s.txt; git commit -qam main2
-  git checkout -q pr; echo shared-pr > s.txt; git commit -qam pr2
-  git merge -q main -m "Merge main into pr" > /dev/null 2>&1; echo resolved > s.txt; git add s.txt; git commit -qm "Merge main into pr"
+  sed -i 's/l2/MAIN-l2/' typed.txt ours.txt theirs.txt; git commit -qam main2
+  git checkout -q pr; sed -i 's/l2/PR-l2/' typed.txt ours.txt theirs.txt; git commit -qam pr2
+  git merge main -m "Update branch" > /dev/null 2>&1
+  git checkout --ours ours.txt; git checkout --theirs theirs.txt; printf 'l1\nhand-typed\nl3\n' > typed.txt
+  git add .; git commit -qm "Update branch"
   echo pr3 > p3.txt; git add .; git commit -qm pr3
   git update-ref refs/remotes/origin/main main
   git rev-parse HEAD > "$TMP/git-head"
@@ -658,15 +664,21 @@ if [[ -n "$CMD" ]]; then
 else
   OUT=""
 fi
-echo "$OUT" | grep -q 'pr2' && echo "$OUT" | grep -q 'pr3' && echo "$OUT" | grep -q 'Merge main into pr' \
+MERGE=$(echo "$OUT" | sed -n '/^    Update branch/,/^    pr3/p')
+echo "$OUT" | grep -q '^    pr2' && echo "$OUT" | grep -q '^    pr3' && [[ -n "$MERGE" ]] \
   && check "the prompt's follow-up command lists the PR's own commits since the last review" yes \
   || { check "the prompt's follow-up command lists the PR's own commits since the last review" no; echo "$OUT" | head -5 | sed 's/^/        /'; }
-! echo "$OUT" | grep -qE 'main1|main2' \
+! echo "$OUT" | grep -qE '^    main[12]' \
   && check "the prompt's follow-up command leaves out the commits that came in from the base branch" yes \
   || check "the prompt's follow-up command leaves out the commits that came in from the base branch" no
-echo "$OUT" | grep -q '++resolved' && ! echo "$OUT" | grep -q 'm1.txt' \
-  && check "the prompt's follow-up command shows the hand-resolved merge and not the files it merged in" yes \
-  || check "the prompt's follow-up command shows the hand-resolved merge and not the files it merged in" no
+for f in typed ours theirs; do
+  echo "$MERGE" | grep -q "^+++ b/$f.txt" \
+    && check "the prompt's follow-up command shows the merge's $f resolution" yes \
+    || check "the prompt's follow-up command shows the merge's $f resolution" no
+done
+! echo "$MERGE" | grep -q 'm1.txt' \
+  && check "the prompt's follow-up command does not show the files the merge brought in from the base branch" yes \
+  || check "the prompt's follow-up command does not show the files the merge brought in from the base branch" no
 
 echo
 echo "passed: $PASS   failed: $FAIL"
