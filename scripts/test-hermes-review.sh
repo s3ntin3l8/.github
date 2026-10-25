@@ -624,6 +624,50 @@ start_fake '{"run_status":"completed","replayed":true,"request_log":"'"$TMP"'/re
 stop_fake
 unset FAKE_REACTION_FAIL REACTION_TOKEN EVENT_NAME COMMENT_ID ISSUE_NUMBER PR_NUMBER
 
+echo "== a follow-up round reviews the PR's own changes, not the base branch's (#130) =="
+# The message the reviewer receives names the range AND says to leave out what is already
+# on the base branch.
+export FAKE_LAST_REVIEWED="" FAKE_MARKER_RUN="run_dead" BASE_SHA="old999"
+: > "$TMP/requests.log"
+start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.followup" 2>&1
+grep -q 'FOLLOW-UP round' "$TMP/requests.log" && grep -q 'EXCLUDING the commits already on the base branch' "$TMP/requests.log" \
+  && check "the follow-up message tells the reviewer to leave out the base branch's commits" yes \
+  || check "the follow-up message tells the reviewer to leave out the base branch's commits" no
+stop_fake
+export BASE_SHA=""
+# The command the review prompt gives, run against a real history: a PR that took
+# "Update branch" (main merged in, with a conflict resolved by hand).
+CMD=$(grep -m1 '^     git log -p' "$ROOT/hermes-review-prompt.md" | sed 's/^ *//')
+G="$TMP/git-delta"; mkdir -p "$G"
+(
+  cd "$G" && git init -q -b main . && git config user.email t@t && git config user.name t
+  echo a > a.txt; echo shared > s.txt; git add .; git commit -qm base
+  git checkout -qb pr; echo pr1 > p1.txt; git add .; git commit -qm pr1
+  git rev-parse HEAD > "$TMP/git-r"
+  git checkout -q main; echo m1 > m1.txt; git add .; git commit -qm main1
+  echo shared-main > s.txt; git commit -qam main2
+  git checkout -q pr; echo shared-pr > s.txt; git commit -qam pr2
+  git merge -q main -m "Merge main into pr" > /dev/null 2>&1; echo resolved > s.txt; git add s.txt; git commit -qm "Merge main into pr"
+  echo pr3 > p3.txt; git add .; git commit -qm pr3
+  git update-ref refs/remotes/origin/main main
+  git rev-parse HEAD > "$TMP/git-head"
+)
+if [[ -n "$CMD" ]]; then
+  OUT=$(cd "$G" && BASE_REF=main HEAD_SHA=$(cat "$TMP/git-head") && eval "${CMD//<base>/$(cat "$TMP/git-r")}" 2>&1)
+else
+  OUT=""
+fi
+echo "$OUT" | grep -q 'pr2' && echo "$OUT" | grep -q 'pr3' && echo "$OUT" | grep -q 'Merge main into pr' \
+  && check "the prompt's follow-up command lists the PR's own commits since the last review" yes \
+  || { check "the prompt's follow-up command lists the PR's own commits since the last review" no; echo "$OUT" | head -5 | sed 's/^/        /'; }
+! echo "$OUT" | grep -qE 'main1|main2' \
+  && check "the prompt's follow-up command leaves out the commits that came in from the base branch" yes \
+  || check "the prompt's follow-up command leaves out the commits that came in from the base branch" no
+echo "$OUT" | grep -q '++resolved' && ! echo "$OUT" | grep -q 'm1.txt' \
+  && check "the prompt's follow-up command shows the hand-resolved merge and not the files it merged in" yes \
+  || check "the prompt's follow-up command shows the hand-resolved merge and not the files it merged in" no
+
 echo
 echo "passed: $PASS   failed: $FAIL"
 [[ $FAIL -eq 0 ]]

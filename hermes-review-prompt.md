@@ -66,17 +66,31 @@ Read these from the message you were given. Do not ask the human for them.
    git fetch origin "$BASE_REF" "$HEAD_SHA"
    ```
    - Follow-up round (the message named a REVIEW_RANGE `<base>..<head>`): review that
-     range only — `git diff <base>..<head> --stat` for the scope. If `<base>` is not an
-     ancestor of `<head>` (the PR was rebased), fall back to the full diff
-     `git diff "$BASE_REF...$HEAD_SHA"` and say so.
+     range only, but ONLY what the PR itself changed in it. When the author used
+     "Update branch" (or merged the base branch in any other way), `<base>..<head>`
+     also contains every commit that landed on `$BASE_REF` meanwhile — that code is not
+     part of this PR and must not be reviewed or commented on. A shallow clone cannot
+     answer ancestry questions, so deepen it and track the base branch first:
+     ```bash
+     git fetch --unshallow origin 2>/dev/null || git fetch origin
+     git fetch origin "$BASE_REF:refs/remotes/origin/$BASE_REF" "<base>"
+     git log -p --cc --reverse "<base>..$HEAD_SHA" "^origin/$BASE_REF"
+     ```
+     Excluding `origin/$BASE_REF` leaves the PR's own commits since `<base>`. `-p --cc`
+     shows each commit's patch, and for a merge commit ONLY what the author changed by
+     hand (conflict resolutions), which IS their work and must be read. Do not use
+     `--stat` or `git diff` on a merge commit: they list the files the merge brought in
+     from the base branch.
+     If `<base>` is not an ancestor of `<head>` (the PR was rebased), fall back to the
+     full diff `git diff "$BASE_REF...$HEAD_SHA"` and say so.
    - First round (no REVIEW_RANGE): the whole diff — `git diff "$BASE_REF...$HEAD_SHA" --stat`.
    A follow-up round is NOT a fresh review of the whole PR: the earlier rounds are in
    the history of this session. Do not re-report what an earlier round already found.
    DO flag anything in the new range that interacts with an earlier finding, and state
    whether the earlier round's findings are addressed.
 3. Per changed file: read full context with the file tool, then
-   `git diff "$BASE_REF...$HEAD_SHA" -- <file>` (or the REVIEW_RANGE diff, for a
-   follow-up round).
+   `git diff "$BASE_REF...$HEAD_SHA" -- <file>` (for a follow-up round: the file's
+   changes in those commits, i.e. the step 2 command followed by `-- <file>`).
 4. Optionally run a quick smoke test if the repo has one (e.g. `pytest -q`).
    Do NOT block on a full suite.
    NEVER do this when the PR author is `dependabot[bot]` (or any bot), or when the head

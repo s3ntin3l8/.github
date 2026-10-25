@@ -873,7 +873,7 @@ jobs:
               else
                 HISTORY_NOTE='Earlier rounds are in the history of this session: do not re-review them, but DO flag anything in the new range that interacts with what was found before, and state whether the previous round findings are addressed.'
               fi
-              HEADER+=$(printf '\nThis is a FOLLOW-UP round. The previous round reviewed up to %s. Review ONLY what changed since then: the range %s..%s (git diff %s..%s). %s If %s is not an ancestor of %s (the PR was rebased), review the whole PR instead.\n' "$BASE_SHA" "$BASE_SHA" "$HEAD_SHA" "$BASE_SHA" "$HEAD_SHA" "$HISTORY_NOTE" "$BASE_SHA" "$HEAD_SHA")
+              HEADER+=$(printf '\nThis is a FOLLOW-UP round. The previous round reviewed up to %s. Review ONLY what the PR itself changed since then: the range %s..%s, EXCLUDING the commits already on the base branch (an "Update branch" merge brings those into the range; they are not part of this PR). The review procedure gives the exact git command. %s If %s is not an ancestor of %s (the PR was rebased), review the whole PR instead.\n' "$BASE_SHA" "$BASE_SHA" "$HEAD_SHA" "$HISTORY_NOTE" "$BASE_SHA" "$HEAD_SHA")
             fi
             if [[ -n "$MODEL" ]]; then
               HEADER+=$(printf '\nPrefer model: %s\n' "$MODEL")
