@@ -237,7 +237,9 @@ marker() {
         # "run:id" or "run:id:state" (state = IN_PROGRESS|COMPLETED; default IN_PROGRESS),
         # optionally "state/CONCLUSION" (default SUCCESS once COMPLETED) and a trailing
         # "@<start>[><end>]" for when the run started (default 2026-01-01T00:00:00Z) and
-        # was closed (default 2099: far enough that any review falls inside the window).
+        # was closed (default 2099, i.e. a close that bounds nothing). A review only pairs while it
+        # is also within 90 min of the start (the cap), so a fixture whose review is later than
+        # that must spell its times out, and put the marker's start inside a plausible run.
         local mrun=${m%%:*} mrest=${m#*:} mid mstate=IN_PROGRESS mconc=null mat=2026-01-01T00:00:00Z mend=2099-01-01T00:00:00Z
         if [[ "$mrest" == *@* ]]; then mat=${mrest#*@}; mrest=${mrest%%@*}; fi
         if [[ "$mat" == *">"* ]]; then mend=${mat#*>}; mat=${mat%%>*}; fi

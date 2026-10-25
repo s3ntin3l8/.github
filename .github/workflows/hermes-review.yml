@@ -638,7 +638,9 @@ jobs:
             # timeout by much, so 90 min caps it (a genuine run past the cap just falls
             # back to the commit_id rule or a full review, the safe direction). The 60 s
             # of slack is for the clock the marker is closed from (the runner's, not
-            # GitHub's); Mullion's relay uses the same slack and cap. Timestamps are
+            # GitHub's). Mullion's relay MUST use the same slack and cap: both put the
+            # base into one idempotency key, and a relay that pairs a marker this refuses
+            # (or the reverse) derives a different base. Timestamps are
             # ISO-8601 UTC; one that does not parse (start, review or close) counts as
             # "not in the window": the start defaults to infinity, never to 0, which
             # would make the lower bound vacuous.
