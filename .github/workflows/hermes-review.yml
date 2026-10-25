@@ -629,9 +629,9 @@ jobs:
             # that is too NEW, which skips code nobody reviewed. 60 s of slack after the
             # close, because the marker is closed from a different clock than GitHub
             # stamps the review with (Mullion's relay uses the same slack). Timestamps
-            # are ISO-8601 UTC; one that does not parse counts as "not in the window".
+            # are ISO-8601 UTC; one that does not parse (start, review or close) counts as "not in the window": the start defaults to infinity, never to 0, which would make the lower bound vacuous.
             LAST_REVIEWED=$(jq -r --argjson reviews "$REVIEWS" \
-              '[.[] | select(.started as $s | .completed as $c | any($reviews[]; ((.submitted_at | try fromdate catch -1) >= ($s | try fromdate catch 0)) and ((.submitted_at | try fromdate catch -1) <= (($c | try fromdate catch 0) + 60))))] | sort_by(.id) | last | .oid // empty' <<< "$MARKERS")
+              '[.[] | select(.started as $s | .completed as $c | any($reviews[]; ((.submitted_at | try fromdate catch -1) >= ($s | try fromdate catch infinite)) and ((.submitted_at | try fromdate catch -1) <= (($c | try fromdate catch 0) + 60))))] | sort_by(.id) | last | .oid // empty' <<< "$MARKERS")
           fi
           # 2. No ledger answer: the last landed review's commit_id -- trusted only while
           # that commit is not newer than the review. GitHub re-points an approval's
@@ -1165,6 +1165,9 @@ jobs:
                       # differently to whoever is paged); on success gh writes none.
                       if ! LANDED_LINES=$(MARKER_STARTED="$MARKER_STARTED" gh api --paginate "repos/$REPO/pulls/$TARGET_NUMBER/reviews?per_page=100" \
                         --jq '.[] | select(.user.login == env.BOT_LOGIN and .submitted_at >= env.MARKER_STARTED and (.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED")) | "landed"' 2>&1); then
+                        # One line: a newline would end the ::error:: annotation, and a following
+                        # line starting with "::" would be parsed as a workflow command.
+                        LANDED_LINES=${LANDED_LINES//$'\n'/ }
                         echo "::error::Hermes' run for this range completed (run $MARKER_RUN), but the pull request's reviews could not be read (${LANDED_LINES:0:200}), so whether its review landed is unknown — review NOT dispatched. Check the PR and ask again."
                         exit 1
                       fi

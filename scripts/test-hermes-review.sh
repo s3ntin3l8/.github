@@ -67,7 +67,7 @@ case "$joined" in
     # A real review list, run through the workflow's own --jq filter, so the
     # filter is exercised here and not only in a consumer run.
     log "reviews"
-    if [[ -n "${FAKE_REVIEWS_FAIL:-}" ]]; then echo "gh: HTTP 403: Resource not accessible by integration" >&2; exit 1; fi
+    if [[ -n "${FAKE_REVIEWS_FAIL:-}" ]]; then printf 'gh: HTTP 403: Resource not accessible by integration\n::warning::injected-second-line\n' >&2; exit 1; fi
     # Hermes' own review at FAKE_LAST_REVIEWED, plus (optionally) another bot's review
     # at FAKE_OTHER_BOT_REVIEWED, which must never count (s3ntin3l8/.github#99).
     # FAKE_LAST_REVIEWED is the commit_id the review REPORTS now (GitHub re-points an
@@ -218,6 +218,11 @@ run_step() { # $1 = step id, $2 = expected skip value
   [[ "$got" == "$want" ]] && check "$id -> skip=$want" yes || check "$id -> skip='$got' (want '$want')" no
 }
 
+# base_is <sha>: the scope step's FINAL base= output. The output file is appended to and
+# starts with an empty "base=" line, so grepping for '^base=$' matches that initial line even
+# when the step later reports a base; only the last one is the answer.
+base_is() { [[ "$(grep '^base=' "$TMP/out.scope" | tail -1)" == "base=$1" ]]; }
+
 # marker [commit ...]: the PR's commits OLDEST first, as GitHub answers them. A commit is
 # "oid:run:id[:state][+run:id[:state]...]" (one marker per run:id), or a bare "oid" for none. No argument =
 # no commit carries a marker.
@@ -274,11 +279,11 @@ export FAKE_LAST_REVIEWED=""
 # Another bot's review on the head is not a Hermes review: no skip, no delta base.
 export FAKE_OTHER_BOT_REVIEWED="head111"
 run_step scope false
-grep -q '^base=$' "$TMP/out.scope" && check "scope: another bot's review sets no delta base" yes || check "scope: another bot's review sets no delta base" no
+base_is "" && check "scope: another bot's review sets no delta base" yes || check "scope: another bot's review sets no delta base" no
 # ...and it does not displace Hermes' own earlier review as the base.
 export FAKE_LAST_REVIEWED="old999"
 run_step scope false
-grep -q '^base=old999$' "$TMP/out.scope" && check "scope: the base stays Hermes' own review" yes || check "scope: the base stays Hermes' own review" no
+base_is "old999" && check "scope: the base stays Hermes' own review" yes || check "scope: the base stays Hermes' own review" no
 export FAKE_LAST_REVIEWED="" FAKE_OTHER_BOT_REVIEWED=""
 
 echo "== the review scope: the reviewed commit comes from the ledger (#129) =="
@@ -289,7 +294,7 @@ export FAKE_HEAD="head111" FAKE_LAST_REVIEWED="head111" FAKE_REVIEW_AT="2026-01-
 export FAKE_COMMIT_DATES="head111=2026-01-03T00:00:00Z"
 marker "old999:run_a:10:COMPLETED@2026-01-01T12:00:00Z" "head111"
 run_step scope false
-grep -q '^base=old999$' "$TMP/out.scope" && check "scope: a re-pointed commit_id does not skip; the base is the ledger's commit" yes || check "scope: a re-pointed commit_id does not skip; the base is the ledger's commit" no
+base_is "old999" && check "scope: a re-pointed commit_id does not skip; the base is the ledger's commit" yes || check "scope: a re-pointed commit_id does not skip; the base is the ledger's commit" no
 # Same content under a new SHA (a rebase or a recreated branch): nothing new to review.
 export FAKE_TREES="old999=treeX head111=treeX"
 run_step scope true
@@ -297,28 +302,28 @@ unset FAKE_TREES
 # A marker whose run was stopped or failed reviewed nothing.
 marker "old999:run_a:10:COMPLETED/CANCELLED@2026-01-01T12:00:00Z" "head111"
 run_step scope false
-grep -q '^base=$' "$TMP/out.scope" && check "scope: a cancelled marker is not a reviewed commit" yes || check "scope: a cancelled marker is not a reviewed commit" no
+base_is "" && check "scope: a cancelled marker is not a reviewed commit" yes || check "scope: a cancelled marker is not a reviewed commit" no
 # A run that completed but posted no review (none submitted after it started) did not
 # review anything either, so the older paired marker wins.
 marker "old999:run_a:10:COMPLETED@2026-01-01T12:00:00Z" "mid555:run_b:20:COMPLETED@2026-01-05T00:00:00Z" "head111"
 run_step scope false
-grep -q '^base=old999$' "$TMP/out.scope" && check "scope: an unpaired success marker falls back to the older paired one" yes || check "scope: an unpaired success marker falls back to the older paired one" no
+base_is "old999" && check "scope: an unpaired success marker falls back to the older paired one" yes || check "scope: an unpaired success marker falls back to the older paired one" no
 # A review that predates the marker was not that run's review (a dismissed one is gone from
 # the landed list altogether), so the marker pairs with nothing and nothing is skipped.
 marker "head111:run_a:10:COMPLETED@2026-01-01T12:00:00Z"
 export FAKE_REVIEW_AT="2025-12-01T00:00:00Z" FAKE_LAST_REVIEWED=""
 run_step scope false
-grep -q '^base=$' "$TMP/out.scope" && check "scope: a review that predates the marker does not pair with it" yes || check "scope: a review that predates the marker does not pair with it" no
+base_is "" && check "scope: a review that predates the marker does not pair with it" yes || check "scope: a review that predates the marker does not pair with it" no
 # No ledger at all and a commit_id newer than the review: it was re-pointed, so the whole
 # diff is reviewed rather than trusting it.
 rm -f "$TMP/marker.json"; unset FAKE_MARKER_FILE
 export FAKE_LAST_REVIEWED="head111" FAKE_REVIEW_AT="2026-01-02T00:00:00Z" FAKE_COMMIT_DATES="head111=2026-01-03T00:00:00Z"
 run_step scope false
-grep -q '^base=$' "$TMP/out.scope" && check "scope: a commit_id newer than its review is not trusted without a ledger" yes || check "scope: a commit_id newer than its review is not trusted without a ledger" no
+base_is "" && check "scope: a commit_id newer than its review is not trusted without a ledger" yes || check "scope: a commit_id newer than its review is not trusted without a ledger" no
 # ...and an unreadable commit is not trusted either.
-export FAKE_COMMIT_DATES="" FAKE_COMMIT_MISSING="head111" FAKE_LAST_REVIEWED="old999"
+export FAKE_COMMIT_DATES="" FAKE_COMMIT_MISSING="old999" FAKE_LAST_REVIEWED="old999"
 run_step scope false
-grep -q '^base=$' "$TMP/out.scope" && check "scope: an unreadable commit_id is not trusted without a ledger" yes || check "scope: an unreadable commit_id is not trusted without a ledger" no
+base_is "" && check "scope: an unreadable commit_id is not trusted without a ledger" yes || check "scope: an unreadable commit_id is not trusted without a ledger" no
 unset FAKE_COMMIT_MISSING FAKE_REVIEW_AT FAKE_COMMIT_DATES
 export FAKE_LAST_REVIEWED="" FAKE_OTHER_BOT_REVIEWED=""
 
@@ -330,17 +335,23 @@ export FAKE_HEAD="head111" FAKE_LAST_REVIEWED="" FAKE_REVIEW_AT="2026-01-01T10:2
 export FAKE_COMMIT_DATES="head111=2026-01-03T00:00:00Z"
 marker "old999:run_a:10:COMPLETED@2026-01-01T10:00:00Z>2026-01-01T10:30:00Z" "mid555:run_b:20:COMPLETED@2026-01-01T11:00:00Z>2026-01-01T11:30:00Z" "head111"
 run_step scope false
-grep -q '^base=old999$' "$TMP/out.scope" && check "scope: a later review from another run does not pair an older silent marker" yes || check "scope: a later review from another run does not pair an older silent marker" no
+base_is "old999" && check "scope: a later review from another run does not pair an older silent marker" yes || check "scope: a later review from another run does not pair an older silent marker" no
 # Clock skew: a review a few seconds after the marker was closed is still the run's.
 unset FAKE_REVIEW2_AT
 export FAKE_REVIEW_AT="2026-01-01T10:30:30Z"
 run_step scope false
-grep -q '^base=old999$' "$TMP/out.scope" && check "scope: 30 s of clock skew after the close still pairs" yes || check "scope: 30 s of clock skew after the close still pairs" no
+base_is "old999" && check "scope: 30 s of clock skew after the close still pairs" yes || check "scope: 30 s of clock skew after the close still pairs" no
 # ...but not minutes after it: that is another run's review, and the (re-pointed) commit_id is not trusted.
 marker "old999:run_a:10:COMPLETED@2026-01-01T10:00:00Z>2026-01-01T10:30:00Z" "head111"
 export FAKE_REVIEW_AT="2026-01-01T10:35:00Z"
 run_step scope false
-grep -q '^base=$' "$TMP/out.scope" && check "scope: a review minutes after the close is not the run's" yes || check "scope: a review minutes after the close is not the run's" no
+base_is "" && check "scope: a review minutes after the close is not the run's" yes || check "scope: a review minutes after the close is not the run's" no
+# A marker whose start does not parse never pairs (it must not make the lower bound vacuous,
+# or a review from BEFORE the run would pair it).
+marker "old999:run_a:10:COMPLETED@not-a-time>2026-01-01T10:30:00Z" "head111"
+export FAKE_REVIEW_AT="2025-12-01T00:00:00Z" FAKE_COMMIT_DATES="head111=2026-01-03T00:00:00Z"
+run_step scope false
+base_is "" && check "scope: a marker with an unparseable start never pairs" yes || check "scope: a marker with an unparseable start never pairs" no
 unset FAKE_REVIEW_AT FAKE_COMMIT_DATES
 export FAKE_LAST_REVIEWED=""
 
@@ -655,8 +666,9 @@ export FAKE_LAST_REVIEWED="head111" FAKE_MARKER_RUN="run_done" FAKE_REVIEWS_FAIL
 start_fake '{"run_statuses":{"run_done":"completed"},"dispatch_codes":[409,202],"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
 ( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.reviewsfail" 2>&1; rc=$?
 [[ $rc -ne 0 && $(grep -c '"method": "POST"' "$TMP/requests.log") -eq 1 ]] && grep -q "NOT dispatched" "$TMP/log.reviewsfail" && grep -q "HTTP 403" "$TMP/log.reviewsfail" && ! grep -q "already landed" "$TMP/log.reviewsfail" \
-  && check "an unreadable reviews list is not read as a landed review, and the error says why" yes \
-  || { check "an unreadable reviews list is not read as a landed review, and the error says why" no; sed 's/^/        /' "$TMP/log.reviewsfail" | tail -4; }
+  && ! grep -q '^::warning::injected-second-line' "$TMP/log.reviewsfail" \
+  && check "an unreadable reviews list is not read as a landed review; the error says why, on one line" yes \
+  || { check "an unreadable reviews list is not read as a landed review; the error says why, on one line" no; sed 's/^/        /' "$TMP/log.reviewsfail" | tail -4; }
 stop_fake
 unset FAKE_REVIEWS_FAIL
 
