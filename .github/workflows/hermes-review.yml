@@ -613,19 +613,25 @@ jobs:
           # (no `checks: read`, no ledger) is the same as no marker.
           if [[ "$LEDGER" == "check-run" ]]; then
             QUERY=$(cat <<'GQL'
-          query($owner:String!,$repo:String!,$number:Int!,$name:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){commits(last:50){nodes{commit{oid checkSuites(first:100){nodes{checkRuns(first:20,filterBy:{checkName:$name}){nodes{databaseId name externalId status conclusion startedAt}}}}}}}}}}
+          query($owner:String!,$repo:String!,$number:Int!,$name:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){commits(last:50){nodes{commit{oid checkSuites(first:100){nodes{checkRuns(first:20,filterBy:{checkName:$name}){nodes{databaseId name externalId status conclusion startedAt completedAt}}}}}}}}}}
           GQL
             )
             # shellcheck disable=SC2016  # $oid is a jq variable, not a shell one
             MARKERS=$(gh api graphql \
               -f query="$QUERY" \
               -F owner="$OWNER" -F repo="${REPO#*/}" -F number="$NUMBER" -f name="$LEDGER_NAME" \
-              --jq '[.data.repository.pullRequest.commits.nodes[] | .commit.oid as $oid | .commit.checkSuites.nodes[].checkRuns.nodes[] | select(.name == env.LEDGER_NAME and .conclusion == "SUCCESS" and .startedAt != null) | {oid: $oid, id: .databaseId, started: .startedAt}]' 2>/dev/null || echo "")
+              --jq '[.data.repository.pullRequest.commits.nodes[] | .commit.oid as $oid | .commit.checkSuites.nodes[].checkRuns.nodes[] | select(.name == env.LEDGER_NAME and .conclusion == "SUCCESS" and .startedAt != null and .completedAt != null) | {oid: $oid, id: .databaseId, started: .startedAt, completed: .completedAt}]' 2>/dev/null || echo "")
             [[ -n "$MARKERS" ]] || MARKERS='[]'
-            # Paired: a landed review was submitted at or after the marker started. The
-            # timestamps are all ISO-8601 UTC, so they compare as strings.
+            # Paired: a landed review was submitted WHILE THE RUN RAN -- between the
+            # marker's start and its close (s3ntin3l8/.github#133). With a lower bound
+            # only, ANY later review paired every older success marker, so a run that
+            # posted nothing could be picked as the base by an unrelated review: a base
+            # that is too NEW, which skips code nobody reviewed. 60 s of slack after the
+            # close, because the marker is closed from a different clock than GitHub
+            # stamps the review with (Mullion's relay uses the same slack). Timestamps
+            # are ISO-8601 UTC; one that does not parse counts as "not in the window".
             LAST_REVIEWED=$(jq -r --argjson reviews "$REVIEWS" \
-              '[.[] | select(.started as $s | any($reviews[]; .submitted_at >= $s))] | sort_by(.id) | last | .oid // empty' <<< "$MARKERS")
+              '[.[] | select(.started as $s | .completed as $c | any($reviews[]; ((.submitted_at | try fromdate catch -1) >= ($s | try fromdate catch 0)) and ((.submitted_at | try fromdate catch -1) <= (($c | try fromdate catch 0) + 60))))] | sort_by(.id) | last | .oid // empty' <<< "$MARKERS")
           fi
           # 2. No ledger answer: the last landed review's commit_id -- trusted only while
           # that commit is not newer than the review. GitHub re-points an approval's
@@ -1153,12 +1159,16 @@ jobs:
                       # not know, so -- like the unreadable-status branch below -- dispatch
                       # nothing and say so (a `| wc -l || echo 0` here printed "0" twice on a
                       # failure, which the check below read as "a review landed", exit 0).
+                      # (Lower bound only, unlike the scope step: this run is over, but its
+                      # marker may not be closed yet, so there is no close time to bound by.)
+                      # stderr is kept so the error says WHY (a 403 and a 429 read very
+                      # differently to whoever is paged); on success gh writes none.
                       if ! LANDED_LINES=$(MARKER_STARTED="$MARKER_STARTED" gh api --paginate "repos/$REPO/pulls/$TARGET_NUMBER/reviews?per_page=100" \
-                        --jq '.[] | select(.user.login == env.BOT_LOGIN and .submitted_at >= env.MARKER_STARTED and (.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED")) | "landed"' 2>/dev/null); then
-                        echo "::error::Hermes' run for this range completed (run $MARKER_RUN), but the pull request's reviews could not be read, so whether its review landed is unknown — review NOT dispatched. Check the PR and ask again."
+                        --jq '.[] | select(.user.login == env.BOT_LOGIN and .submitted_at >= env.MARKER_STARTED and (.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED")) | "landed"' 2>&1); then
+                        echo "::error::Hermes' run for this range completed (run $MARKER_RUN), but the pull request's reviews could not be read (${LANDED_LINES:0:200}), so whether its review landed is unknown — review NOT dispatched. Check the PR and ask again."
                         exit 1
                       fi
-                      LANDED=$(printf '%s\n' "$LANDED_LINES" | grep -c landed || true)
+                      LANDED=$(printf '%s\n' "$LANDED_LINES" | grep -cx landed || true)
                     fi
                     if [[ "${LANDED:-0}" != "0" ]]; then
                       echo "::notice::the run Hermes held for this range completed and its review already landed — not dispatching another."

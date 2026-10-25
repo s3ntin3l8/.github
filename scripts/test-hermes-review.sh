@@ -67,13 +67,17 @@ case "$joined" in
     # A real review list, run through the workflow's own --jq filter, so the
     # filter is exercised here and not only in a consumer run.
     log "reviews"
-    [[ -n "${FAKE_REVIEWS_FAIL:-}" ]] && exit 1
+    if [[ -n "${FAKE_REVIEWS_FAIL:-}" ]]; then echo "gh: HTTP 403: Resource not accessible by integration" >&2; exit 1; fi
     # Hermes' own review at FAKE_LAST_REVIEWED, plus (optionally) another bot's review
     # at FAKE_OTHER_BOT_REVIEWED, which must never count (s3ntin3l8/.github#99).
     # FAKE_LAST_REVIEWED is the commit_id the review REPORTS now (GitHub re-points an
     # approval's at the head when the branch is rewritten, #129); FAKE_REVIEW_AT is when
     # it was submitted.
     reviews='[{"user":{"type":"Bot","login":"s3ntin3l8-hermes[bot]"},"state":"APPROVED","commit_id":"'"${FAKE_LAST_REVIEWED:-}"'","submitted_at":"'"${FAKE_REVIEW_AT:-2026-01-02T00:00:00Z}"'"}'
+    # A second, later Hermes review (a run whose marker was never written, #133).
+    if [[ -n "${FAKE_REVIEW2_AT:-}" ]]; then
+      reviews+=',{"user":{"type":"Bot","login":"s3ntin3l8-hermes[bot]"},"state":"COMMENTED","commit_id":"","submitted_at":"'"${FAKE_REVIEW2_AT}"'"}'
+    fi
     if [[ -n "${FAKE_OTHER_BOT_REVIEWED:-}" ]]; then
       reviews+=',{"user":{"type":"Bot","login":"claude[bot]"},"state":"COMMENTED","commit_id":"'"${FAKE_OTHER_BOT_REVIEWED}"'","submitted_at":"2026-01-02T00:00:00Z"}'
     fi
@@ -227,13 +231,15 @@ marker() {
       for m in "${ms[@]}"; do
         # "run:id" or "run:id:state" (state = IN_PROGRESS|COMPLETED; default IN_PROGRESS),
         # optionally "state/CONCLUSION" (default SUCCESS once COMPLETED) and a trailing
-        # "@<iso time>" for when the run started (default 2026-01-01T00:00:00Z).
-        local mrun=${m%%:*} mrest=${m#*:} mid mstate=IN_PROGRESS mconc=null mat=2026-01-01T00:00:00Z
+        # "@<start>[><end>]" for when the run started (default 2026-01-01T00:00:00Z) and
+        # was closed (default 2099: far enough that any review falls inside the window).
+        local mrun=${m%%:*} mrest=${m#*:} mid mstate=IN_PROGRESS mconc=null mat=2026-01-01T00:00:00Z mend=2099-01-01T00:00:00Z
         if [[ "$mrest" == *@* ]]; then mat=${mrest#*@}; mrest=${mrest%%@*}; fi
+        if [[ "$mat" == *">"* ]]; then mend=${mat#*>}; mat=${mat%%>*}; fi
         mid=${mrest%%:*}; [[ "$mrest" == *:* ]] && mstate=${mrest#*:}
         if [[ "$mstate" == */* ]]; then mconc='"'${mstate#*/}'"'; mstate=${mstate%%/*}
         elif [[ "$mstate" == COMPLETED ]]; then mconc='"SUCCESS"'; fi
-        runs+="${runs:+,}"'{"databaseId":'"$mid"',"name":"Hermes review","externalId":"'"$mrun"'","status":"'"$mstate"'","conclusion":'"$mconc"',"startedAt":"'"$mat"'"}'
+        runs+="${runs:+,}"'{"databaseId":'"$mid"',"name":"Hermes review","externalId":"'"$mrun"'","status":"'"$mstate"'","conclusion":'"$mconc"',"startedAt":"'"$mat"'","completedAt":'"$([[ "$mconc" == null ]] && echo null || echo "\"$mend\"")"'}'
       done
     fi
     nodes+="${nodes:+,}"'{"commit":{"oid":"'"$oid"'","checkSuites":{"nodes":[{"checkRuns":{"nodes":['"$runs"']}}]}}}'
@@ -315,6 +321,28 @@ run_step scope false
 grep -q '^base=$' "$TMP/out.scope" && check "scope: an unreadable commit_id is not trusted without a ledger" yes || check "scope: an unreadable commit_id is not trusted without a ledger" no
 unset FAKE_COMMIT_MISSING FAKE_REVIEW_AT FAKE_COMMIT_DATES
 export FAKE_LAST_REVIEWED="" FAKE_OTHER_BOT_REVIEWED=""
+
+echo "== the review scope: a marker is paired with its own run's review (#133) =="
+# Run A (10:00-10:30) posted the review at 10:20. Run B (11:00-11:30) posted nothing.
+# A later review at 13:00 comes from a run whose marker was never written. A lower bound
+# alone paired that review with B, and the base became B: too new, code skipped.
+export FAKE_HEAD="head111" FAKE_LAST_REVIEWED="" FAKE_REVIEW_AT="2026-01-01T10:20:00Z" FAKE_REVIEW2_AT="2026-01-01T13:00:00Z"
+export FAKE_COMMIT_DATES="head111=2026-01-03T00:00:00Z"
+marker "old999:run_a:10:COMPLETED@2026-01-01T10:00:00Z>2026-01-01T10:30:00Z" "mid555:run_b:20:COMPLETED@2026-01-01T11:00:00Z>2026-01-01T11:30:00Z" "head111"
+run_step scope false
+grep -q '^base=old999$' "$TMP/out.scope" && check "scope: a later review from another run does not pair an older silent marker" yes || check "scope: a later review from another run does not pair an older silent marker" no
+# Clock skew: a review a few seconds after the marker was closed is still the run's.
+unset FAKE_REVIEW2_AT
+export FAKE_REVIEW_AT="2026-01-01T10:30:30Z"
+run_step scope false
+grep -q '^base=old999$' "$TMP/out.scope" && check "scope: 30 s of clock skew after the close still pairs" yes || check "scope: 30 s of clock skew after the close still pairs" no
+# ...but not minutes after it: that is another run's review, and the (re-pointed) commit_id is not trusted.
+marker "old999:run_a:10:COMPLETED@2026-01-01T10:00:00Z>2026-01-01T10:30:00Z" "head111"
+export FAKE_REVIEW_AT="2026-01-01T10:35:00Z"
+run_step scope false
+grep -q '^base=$' "$TMP/out.scope" && check "scope: a review minutes after the close is not the run's" yes || check "scope: a review minutes after the close is not the run's" no
+unset FAKE_REVIEW_AT FAKE_COMMIT_DATES
+export FAKE_LAST_REVIEWED=""
 
 echo "== the in-flight marker =="
 start_fake '{"run_status":"running","request_log":"'"$TMP"'/requests.log"}'
@@ -626,9 +654,9 @@ export FAKE_LAST_REVIEWED="head111" FAKE_MARKER_RUN="run_done" FAKE_REVIEWS_FAIL
 : > "$TMP/requests.log"
 start_fake '{"run_statuses":{"run_done":"completed"},"dispatch_codes":[409,202],"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
 ( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.reviewsfail" 2>&1; rc=$?
-[[ $rc -ne 0 && $(grep -c '"method": "POST"' "$TMP/requests.log") -eq 1 ]] && grep -q "NOT dispatched" "$TMP/log.reviewsfail" && ! grep -q "already landed" "$TMP/log.reviewsfail" \
-  && check "an unreadable reviews list is not read as a landed review" yes \
-  || { check "an unreadable reviews list is not read as a landed review" no; sed 's/^/        /' "$TMP/log.reviewsfail" | tail -4; }
+[[ $rc -ne 0 && $(grep -c '"method": "POST"' "$TMP/requests.log") -eq 1 ]] && grep -q "NOT dispatched" "$TMP/log.reviewsfail" && grep -q "HTTP 403" "$TMP/log.reviewsfail" && ! grep -q "already landed" "$TMP/log.reviewsfail" \
+  && check "an unreadable reviews list is not read as a landed review, and the error says why" yes \
+  || { check "an unreadable reviews list is not read as a landed review, and the error says why" no; sed 's/^/        /' "$TMP/log.reviewsfail" | tail -4; }
 stop_fake
 unset FAKE_REVIEWS_FAIL
 
@@ -731,16 +759,18 @@ G="$TMP/git-delta"; mkdir -p "$G"
   git checkout -qb pr; echo pr1 > p1.txt; git add .; git commit -qm pr1
   git rev-parse HEAD > "$TMP/git-r"
   git checkout -q main; echo m1 > m1.txt; git add .; git commit -qm main1
-  sed -i 's/l2/MAIN-l2/' typed.txt ours.txt theirs.txt; git commit -qam main2
-  git checkout -q pr; sed -i 's/l2/PR-l2/' typed.txt ours.txt theirs.txt; git commit -qam pr2
+  for f in typed ours theirs; do sed 's/l2/MAIN-l2/' "$f.txt" > "$f.tmp" && mv "$f.tmp" "$f.txt"; done; git commit -qam main2
+  git checkout -q pr; for f in typed ours theirs; do sed 's/l2/PR-l2/' "$f.txt" > "$f.tmp" && mv "$f.tmp" "$f.txt"; done; git commit -qam pr2
   git merge main -m "Update branch" > /dev/null 2>&1
-  git checkout --ours ours.txt; git checkout --theirs theirs.txt; printf 'l1\nhand-typed\nl3\n' > typed.txt
+  git checkout --ours ours.txt > /dev/null 2>&1; git checkout --theirs theirs.txt > /dev/null 2>&1; printf 'l1\nhand-typed\nl3\n' > typed.txt
   git add .; git commit -qm "Update branch"
   echo pr3 > p3.txt; git add .; git commit -qm pr3
   git update-ref refs/remotes/origin/main main
   git rev-parse HEAD > "$TMP/git-head"
 )
 if [[ -n "$CMD" ]]; then
+  # BASE_REF and HEAD_SHA are read by the eval'd command from the prompt.
+  # shellcheck disable=SC2034
   OUT=$(cd "$G" && BASE_REF=main HEAD_SHA=$(cat "$TMP/git-head") && eval "${CMD//<base>/$(cat "$TMP/git-r")}" 2>&1)
 else
   OUT=""
