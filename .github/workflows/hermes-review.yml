@@ -598,8 +598,12 @@ jobs:
           # idempotency key; s3ntin3l8/.github#99 narrowed it, and the relay must follow
           # or the two entry points stop deduplicating against each other.)
           # `env.BOT_LOGIN` rather than `--arg`: `gh api --jq` takes exactly one argument.
-          REVIEWS=$(gh api "repos/$REPO/pulls/$NUMBER/reviews?per_page=100" \
-            --jq '[.[] | select(.user.login == env.BOT_LOGIN and (.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED")) | {commit_id, submitted_at}]' 2>/dev/null || echo "")
+          # Every page: reviews come back oldest first, so a PR with more than one page of
+          # them would otherwise lose the NEWEST ones -- the newest marker would never pair
+          # and the base would fall back to an ancient commit. `--paginate` applies the
+          # filter per page, so the per-page arrays are joined afterwards.
+          REVIEWS=$(gh api --paginate "repos/$REPO/pulls/$NUMBER/reviews?per_page=100" \
+            --jq '[.[] | select(.user.login == env.BOT_LOGIN and (.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED")) | {commit_id, submitted_at}]' 2>/dev/null | jq -s 'add // []' 2>/dev/null || echo "")
           [[ -n "$REVIEWS" ]] || REVIEWS='[]'
           echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           LAST_REVIEWED=""
@@ -612,6 +616,7 @@ jobs:
           query($owner:String!,$repo:String!,$number:Int!,$name:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){commits(last:50){nodes{commit{oid checkSuites(first:100){nodes{checkRuns(first:20,filterBy:{checkName:$name}){nodes{databaseId name externalId status conclusion startedAt}}}}}}}}}}
           GQL
             )
+            # shellcheck disable=SC2016  # $oid is a jq variable, not a shell one
             MARKERS=$(gh api graphql \
               -f query="$QUERY" \
               -F owner="$OWNER" -F repo="${REPO#*/}" -F number="$NUMBER" -f name="$LEDGER_NAME" \
@@ -1143,8 +1148,9 @@ jobs:
                       --jq '[.check_runs[] | select(.external_id == env.MARKER_RUN) | .started_at] | first // empty' 2>/dev/null || echo "")
                     LANDED=0
                     if [[ -n "$MARKER_STARTED" ]]; then
-                      LANDED=$(MARKER_STARTED="$MARKER_STARTED" gh api "repos/$REPO/pulls/$TARGET_NUMBER/reviews?per_page=100" \
-                        --jq '[.[] | select(.user.login == env.BOT_LOGIN and .submitted_at >= env.MARKER_STARTED and (.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED"))] | length' 2>/dev/null || echo 0)
+                      # One line per matching review, counted: the filter runs per page.
+                      LANDED=$(MARKER_STARTED="$MARKER_STARTED" gh api --paginate "repos/$REPO/pulls/$TARGET_NUMBER/reviews?per_page=100" \
+                        --jq '.[] | select(.user.login == env.BOT_LOGIN and .submitted_at >= env.MARKER_STARTED and (.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED")) | "landed"' 2>/dev/null | wc -l || echo 0)
                     fi
                     if [[ "${LANDED:-0}" != "0" ]]; then
                       echo "::notice::the run Hermes held for this range completed and its review already landed — not dispatching another."
