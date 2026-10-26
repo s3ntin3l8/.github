@@ -1,57 +1,45 @@
 name: Repo settings audit
 
-# Fails when a public, non-archived repo of this owner does not require approval
-# for ALL outside collaborators' fork PR workflows (`all_external_contributors`).
-# That admin toggle is the real control keeping fork PRs off self-hosted runners
-# (an in-file guard is not: a fork PR runs its own copy of the workflow file), and
-# nothing else observes it. See SECURITY.md and s3ntin3l8/.github#139.
+# Fails when a public, non-archived repo of this owner drifts from the settings the
+# workflows' security model relies on (scripts/repo_settings_audit.py): fork-PR
+# approval for all outside collaborators (the real control keeping fork PRs off
+# self-hosted runners: a fork PR runs its own copy of the workflow file),
+# read-only default workflow token, Actions not approving PRs, a protected default
+# branch (status checks + conversation resolution), secret scanning + push
+# protection, and squash-only merges with branch auto-delete. Intentional
+# differences live in .github/repo-settings-audit.json. See SECURITY.md and
+# s3ntin3l8/.github#139.
 #
 # Needs the repo secret REPO_SETTINGS_TOKEN: a fine-grained PAT (or App token) for
-# this owner, all repositories, with "Administration: read" and "Metadata: read".
-# The Hermes review App token gets 403 on this endpoint, so it cannot be reused.
+# this owner, all repositories, with Administration: read, Metadata: read and
+# Secret scanning alerts: read. The Hermes review App token gets 403 on these
+# endpoints, so it cannot be reused.
 
 on:
   schedule:
     - cron: '17 5 * * 1' # Mondays 05:17 UTC
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
   group: repo-settings-audit
   cancel-in-progress: false
 
 jobs:
-  fork-pr-approval:
-    name: fork-pr-approval
+  audit:
+    name: audit
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       GH_TOKEN: ${{ secrets.REPO_SETTINGS_TOKEN }}
       OWNER: ${{ github.repository_owner }}
     steps:
-      - name: Check fork-pr-contributor-approval on every public repo
-        shell: bash
-        run: |
-          set -uo pipefail
-          if [ -z "${GH_TOKEN}" ]; then
-            echo "::error::REPO_SETTINGS_TOKEN is not set; the audit cannot run (see header comment)."
-            exit 1
-          fi
-          repos=$(gh repo list "$OWNER" --visibility public --no-archived --limit 1000 --json name --jq '.[].name') || {
-            echo "::error::could not list repositories for $OWNER"
-            exit 1
-          }
-          [ -n "$repos" ] || { echo "::error::no public repositories found for $OWNER"; exit 1; }
-          bad=0
-          while read -r name; do
-            policy=$(gh api "repos/$OWNER/$name/actions/permissions/fork-pr-contributor-approval" --jq .approval_policy 2>/dev/null) || policy="<unreadable>"
-            if [ "$policy" = "all_external_contributors" ]; then
-              echo "ok    $name"
-            else
-              echo "::error title=Fork PR approval::$OWNER/$name has approval_policy=$policy (want all_external_contributors)"
-              bad=$((bad + 1))
-            fi
-          done <<< "$repos"
-          echo "$bad repo(s) out of policy"
-          [ "$bad" -eq 0 ]
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Unit-test the checks
+        run: python3 -m unittest discover -s scripts -p 'test_repo_settings_audit.py'
+      - name: Audit public repositories
+        run: python3 scripts/repo_settings_audit.py
