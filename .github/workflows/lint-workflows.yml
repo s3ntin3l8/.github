@@ -44,3 +44,23 @@ jobs:
           persist-credentials: false
       - name: Audit GitHub Actions workflows
         uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+
+  # The hermes-review.yml protocol test: the workflow's own scope/in-flight/dispatch steps,
+  # extracted from the YAML, run against a fake gh and a fake Hermes (no secrets, no
+  # network). Consumers track @main, so a bug merged here is live everywhere on its next
+  # run; this is the gate in front of that. No `paths:` filter, for the reason given at
+  # the top of this file: a required check has to report on every PR.
+  hermes-harness:
+    name: hermes-harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run the hermes-review harness
+        run: |
+          # The harness reads the workflow with PyYAML from the first python3 on PATH; the
+          # runner's system python is externally managed, so use a venv.
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet pyyaml==6.0.2
+          PATH="$RUNNER_TEMP/venv/bin:$PATH" bash scripts/test-hermes-review.sh
