@@ -48,6 +48,7 @@ Runs `lint` / `typecheck` (opt-in) / `test` npm scripts when present (the defaul
   - **`detect-secrets-scope`** (default `all`) — `changed` scans only files that differ from the base commit (plus every file the previous baseline listed). It deepens the checkout fetch and falls back to a whole-tree scan when no base commit is available.
   - **`test-pool`** (default `''` = Vitest's default) — Vitest worker pool, e.g. `vmThreads`, which reuses one jsdom environment per worker instead of building one per test file.
   - **`turbo-cache`** (default `true`) — cache `**/.turbo` under `working-directory` across runs (keyed by commit SHA, OS-scoped restore-key fallback). On by default: safe even for non-Turborepo callers (`actions/cache` no-ops on a missing path) and can't produce a stale/wrong result (Turbo's own hashing is content-based). Set `false` to opt out.
+  - **`next-cache`** (default `true`) — cache `**/.next/cache` under `working-directory`, keyed by the lockfile + a hash of the JS/TS sources (restore-key fallbacks to the lockfile, then the OS) so `next build` starts warm. On by default for the same reason as `turbo-cache` (no-op without a `.next/cache`). Set `false` to opt out, e.g. if Turborepo already restores `.next`.
 - **Expects:** a `package-lock.json` (uses `npm ci`). For coverage, a test setup that writes an istanbul `json-summary` report to `coverage/coverage-summary.json` (vitest v8, jest, c8, …).
 - **Test Analytics (optional):** if the test runner emits JUnit XML (vitest `--reporter=junit --outputFile=./test-results/junit.xml`, or jest with jest-junit), it's uploaded to Codecov Test Analytics.
 
@@ -79,7 +80,7 @@ Native Android and iOS companion application CI with `gomobile` support. Runs JD
 Multi-arch builds (amd64/arm64), GHCR push, and Cosign signing.
 - **Caller permissions (required):** `contents: read`, `packages: write`, `id-token: write`.
 - **Secrets:** `REGISTRY_USERNAME`/`REGISTRY_TOKEN` (optional; falls back to `GITHUB_TOKEN`) — pass via `secrets: inherit`. `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` (optional) authenticate base-image pulls from Docker Hub; without them pulls are anonymous and may hit the rate limit (429). Use a read-only ("Public Repo Read-only") access token.
-- **Inputs:** `image-name` (required), `push-edge`, `push-release`, `release-tag`, `platforms`, `dockerfile`, `build-args`.
+- **Inputs:** `image-name` (required), `push-edge`, `push-release`, `release-tag` (a component-prefixed release-please tag such as `app-v1.2.3` works: the prefix is stripped before the semver image tags are derived), `platforms`, `dockerfile`, `build-args`.
 - **Built commit:** the build always receives `COMMIT_SHA=<the commit it checked out>` (the tag's commit for a release build). Use that for a build stamp instead of `${{ github.sha }}`, which is the commit that triggered the *caller* and differs on a manual dispatch or a rebuild of an older tag. Declare `ARG COMMIT_SHA` where you consume it.
 - **Build-arg check:** each `build-args` key is checked against `dockerfile`. The build **fails** when the final stage references `$X` without its own `ARG X` (the value would be silently empty) and **warns** when `X` appears nowhere in the Dockerfile. An arg consumed only in a builder stage (baked into a bundle) is fine.
 
@@ -124,7 +125,7 @@ centralized-prompt, reusable design. See [`s3ntin3l8/.github` #18](https://githu
 - **PR mention** → diff review (uses [`hermes-review-prompt.md`](hermes-review-prompt.md)).
 - **Issue mention** → triage; may open a *draft* PR that **Closes #N** and is presented
   for human approval (uses [`hermes-triage-prompt.md`](hermes-triage-prompt.md)).
-- **Caller permissions (required):** `contents: write`, `pull-requests: write`, `issues: write`, `checks: write`.
+- **Caller permissions (required):** `contents: read` only. Every `gh` call uses the Hermes App token (it requests its own `checks`/`issues`/`pull-requests` scopes); the caller's `GITHUB_TOKEN` is used only by `actions/checkout` of the shared prompt repo. Callers that still grant the four write scopes keep working; the extra scopes are unused and can be dropped.
 - **Secrets:** `HERMES_APP_ID`, `HERMES_APP_PRIVATE_KEY` (used by the runner to resolve the PR/issue for routing), and `HERMES_API_KEY` (bearer key for the hermes-01 API server) — pass via `secrets: inherit`. To auto-review **dependabot** PRs (the default), mirror the same three secrets into the repo's **Settings → Secrets and variables → Dependabot**: a dependabot-authored `pull_request` run sees only those. Without them the run skips green with a notice rather than failing.
 - **Auto-review skips:** bot authors `s3ntin3l8-hermes[bot]` (self) and `github-actions[bot]` (release-please), fork PRs, and `mullion/task-*` branches. `dependabot[bot]` is reviewed — a bump can change a runtime tool version without saying so (runway-ai-usage-tracker#627).
 - **Variables:** `HERMES_MODEL` (optional model override).

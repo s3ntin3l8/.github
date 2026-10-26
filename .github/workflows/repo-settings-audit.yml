@@ -1,0 +1,45 @@
+name: Repo settings audit
+
+# Fails when a public, non-archived repo of this owner drifts from the settings the
+# workflows' security model relies on (scripts/repo_settings_audit.py): fork-PR
+# approval for all outside collaborators (the real control keeping fork PRs off
+# self-hosted runners: a fork PR runs its own copy of the workflow file),
+# read-only default workflow token, a protected default
+# branch (status checks + conversation resolution), secret scanning + push
+# protection, and squash-only merges with branch auto-delete. Intentional
+# differences live in .github/repo-settings-audit.json. See SECURITY.md and
+# s3ntin3l8/.github#139.
+#
+# Needs the repo secret REPO_SETTINGS_TOKEN: a fine-grained PAT (or App token) for
+# this owner, all repositories, with Administration: read, Metadata: read and
+# Secret scanning alerts: read. The Hermes review App token gets 403 on these
+# endpoints, so it cannot be reused.
+
+on:
+  schedule:
+    - cron: '17 5 * * 1' # Mondays 05:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repo-settings-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.REPO_SETTINGS_TOKEN }}
+      OWNER: ${{ github.repository_owner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Unit-test the checks
+        run: python3 -m unittest discover -s scripts -p 'test_repo_settings_audit.py'
+      - name: Audit public repositories
+        run: python3 scripts/repo_settings_audit.py
