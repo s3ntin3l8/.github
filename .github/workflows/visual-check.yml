@@ -55,7 +55,7 @@ on:
 # sticky comment. The group name is deliberately not the caller's (`<workflow>-<ref>`): the same name in both
 # would make the called run cancel its own caller.
 concurrency:
-  group: visual-check-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
+  group: visual-check-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
   cancel-in-progress: true
 
 # Dependencies the demo needs are installed by `.github/visual-setup.sh` when the repo has one
@@ -133,7 +133,9 @@ jobs:
           if [ -f "$summary" ]; then
             # An issue comment holds at most 65536 characters: cut at 60000 bytes and let iconv drop a
             # multi-byte character the cut may have split (the API rejects invalid UTF-8).
-            body=$(head -c 60000 "$summary" | iconv -f UTF-8 -t UTF-8 -c)
+            # iconv -c drops the split character but still exits 1 on an incomplete tail, which pipefail
+            # would turn into a failed step; the valid prefix on stdout is what we want.
+            body=$(head -c 60000 "$summary" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null || true)
             if [ "$(wc -c < "$summary")" -gt 60000 ]; then
               body="$body"$'\n\n'"_(summary truncated; the full report is in the artifact)_"
             fi
