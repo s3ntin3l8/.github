@@ -223,12 +223,15 @@ run_step() { # $1 = step id, $2 = expected skip value
 # when the step later reports a base; only the last one is the answer.
 base_is() { [[ "$(grep '^base=' "$TMP/out.scope" | tail -1)" == "base=$1" ]]; }
 
-# marker [commit ...]: the PR's commits OLDEST first, as GitHub answers them. A commit is
+# marker [commit ...] [-- before ...]: the PR's commits OLDEST first, as GitHub answers them. A commit is
 # "oid:run:id[:state][+run:id[:state]...]" (one marker per run:id), or a bare "oid" for none. No argument =
-# no commit carries a marker.
+# no commit carries a marker. Commits after a "--" are the heads the PR had BEFORE a force-push (#136), in
+# the same syntax; the word "null" is a force-push whose before-commit GitHub has already collected.
 marker() {
-  local c oid rest m nodes=""
+  local c oid rest m nodes="" before="" in_before=0
   for c in "$@"; do
+    if [[ "$c" == "--" ]]; then in_before=1; continue; fi
+    if [[ "$c" == null ]]; then before+="${before:+,}"'{"beforeCommit":null}'; continue; fi
     oid=${c%%:*}; rest=""; [[ "$c" == *:* ]] && rest=${c#*:}
     local runs=""
     if [[ -n "$rest" ]]; then
@@ -249,9 +252,14 @@ marker() {
         runs+="${runs:+,}"'{"databaseId":'"$mid"',"name":"Hermes review","externalId":"'"$mrun"'","status":"'"$mstate"'","conclusion":'"$mconc"',"startedAt":"'"$mat"'","completedAt":'"$([[ "$mconc" == null ]] && echo null || echo "\"$mend\"")"'}'
       done
     fi
-    nodes+="${nodes:+,}"'{"commit":{"oid":"'"$oid"'","checkSuites":{"nodes":[{"checkRuns":{"nodes":['"$runs"']}}]}}}'
+    local body='"oid":"'"$oid"'","checkSuites":{"nodes":[{"checkRuns":{"nodes":['"$runs"']}}]}'
+    if (( in_before )); then
+      before+="${before:+,}"'{"beforeCommit":{'"$body"'}}'
+    else
+      nodes+="${nodes:+,}"'{"commit":{'"$body"'}}'
+    fi
   done
-  printf '%s' '{"data":{"repository":{"pullRequest":{"commits":{"nodes":['"$nodes"']}}}}}' > "$TMP/marker.json"
+  printf '%s' '{"data":{"repository":{"pullRequest":{"commits":{"nodes":['"$nodes"']},"timelineItems":{"nodes":['"$before"']}}}}}' > "$TMP/marker.json"
   export FAKE_MARKER_FILE="$TMP/marker.json"
 }
 
@@ -375,6 +383,38 @@ base_is "" && check "scope: a review past the 90 min cap is not the run's" yes |
 unset FAKE_REVIEW_AT FAKE_COMMIT_DATES
 export FAKE_LAST_REVIEWED=""
 
+echo "== the review scope: a force-push drops the reviewed commit (#136) =="
+# The #1932 shape. Run A reviewed old999 (still in the PR). Run B reviewed gone777, which a
+# force-push has since dropped from the PR: its marker is only reachable as the before-commit
+# of the force-push event. Both runs landed a review while they ran.
+RUN_A="old999:run_a:10:COMPLETED@2026-01-01T10:00:00Z>2026-01-01T10:30:00Z"
+RUN_B="gone777:run_b:20:COMPLETED@2026-01-01T11:00:00Z>2026-01-01T11:30:00Z"
+export FAKE_HEAD="head111" FAKE_LAST_REVIEWED="" FAKE_REVIEW_AT="2026-01-01T10:20:00Z" FAKE_REVIEW2_AT="2026-01-01T11:20:00Z"
+export FAKE_COMMIT_DATES="head111=2026-01-03T00:00:00Z"
+# Same tree as the dropped reviewed commit: a rewrite that changed nothing is skipped.
+marker "$RUN_A" "head111" -- "$RUN_B"
+export FAKE_TREES="gone777=treeX head111=treeX"
+run_step scope true
+unset FAKE_TREES
+# A different tree is a real change: reviewed as a delta from the dropped commit (the prompt
+# falls back to the full diff when that base is no longer an ancestor).
+run_step scope false
+base_is "gone777" && check "scope: the dropped commit's marker is the base" yes || check "scope: the dropped commit's marker is the base" no
+# A before-commit marker that never paired (cancelled run) is not a reviewed commit.
+marker "$RUN_A" "head111" -- "gone777:run_b:20:COMPLETED/CANCELLED@2026-01-01T11:00:00Z>2026-01-01T11:30:00Z"
+run_step scope false
+base_is "old999" && check "scope: a cancelled before-commit marker falls back to the older paired one" yes || check "scope: a cancelled before-commit marker falls back to the older paired one" no
+# GitHub has collected the before-commit: nothing to read, and no crash.
+marker "$RUN_A" "head111" -- null
+run_step scope false
+base_is "old999" && check "scope: a collected before-commit (null) is ignored" yes || check "scope: a collected before-commit (null) is ignored" no
+# The same marker reachable twice (still in the PR AND a before-commit) is one marker.
+marker "$RUN_B" "head111" -- "$RUN_B"
+run_step scope false
+base_is "gone777" && check "scope: a marker seen twice is not a problem" yes || check "scope: a marker seen twice is not a problem" no
+unset FAKE_REVIEW_AT FAKE_REVIEW2_AT FAKE_COMMIT_DATES
+export FAKE_LAST_REVIEWED=""
+
 echo "== the in-flight marker =="
 start_fake '{"run_status":"running","request_log":"'"$TMP"'/requests.log"}'
 marker head111                         # a commit, but no marker on it
@@ -401,6 +441,15 @@ marker "head111:run_done:30+run_live:40"
 run_step inflight true
 marker "head111:run_live:40+run_done:30"
 run_step inflight true
+# A run still live on a head a force-push dropped (#136): stopped, not queued behind.
+marker "head111" -- "gone777:run_live:10"
+run_step inflight false
+grep -q "^stale_run=run_live" "$TMP/out.inflight" && check "inflight: a live run on a force-pushed-away head is stopped" yes || check "inflight: a live run on a force-pushed-away head is stopped" no
+# ...and the newest marker still decides, wherever it was found.
+marker "head111:run_live:30" -- "gone777:run_done:10"
+run_step inflight true
+marker "head111" -- null
+run_step inflight false
 marker "old999:run_done:10"
 stop_fake
 start_fake '{"run_status":"completed","request_log":"'"$TMP"'/requests.log"}'
