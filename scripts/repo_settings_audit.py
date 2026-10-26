@@ -74,14 +74,17 @@ def check_secret_scanning(d):
 
 def check_merge_methods(d):
     r = d["repo"]
+    keys = ("allow_squash_merge", "allow_merge_commit", "allow_rebase_merge", "delete_branch_on_merge")
+    if any(r.get(k) is None for k in keys):
+        return ["merge settings not visible to the token (REST fields absent)"]
     problems = []
-    if not r.get("allow_squash_merge"):
+    if not r["allow_squash_merge"]:
         problems.append("squash merge disabled")
-    if r.get("allow_merge_commit"):
+    if r["allow_merge_commit"]:
         problems.append("merge commits allowed")
-    if r.get("allow_rebase_merge"):
+    if r["allow_rebase_merge"]:
         problems.append("rebase merge allowed")
-    if not r.get("delete_branch_on_merge"):
+    if not r["delete_branch_on_merge"]:
         problems.append("branch not auto-deleted on merge")
     return problems
 
@@ -97,6 +100,9 @@ CHECKS = {
 SKIP_FORKS = {"branch-protection", "merge-methods"}
 
 
+MERGE_KEYS = ("allow_squash_merge", "allow_merge_commit", "allow_rebase_merge", "delete_branch_on_merge")
+
+
 def gh(path):
     """GET a gh api path; return parsed JSON, or None on a 403/404-style error."""
     r = subprocess.run(["gh", "api", path], capture_output=True, text=True)
@@ -110,6 +116,16 @@ def gh(path):
 def fetch(owner, name):
     base = f"repos/{owner}/{name}"
     repo = gh(base) or {}
+    if any(repo.get(k) is None for k in MERGE_KEYS):
+        # Some tokens get these fields only over GraphQL.
+        q = ("query($o:String!,$n:String!){repository(owner:$o,name:$n){"
+             "squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed deleteBranchOnMerge}}")
+        r = subprocess.run(["gh", "api", "graphql", "-f", f"query={q}", "-f", f"o={owner}", "-f", f"n={name}"],
+                           capture_output=True, text=True)
+        g = (json.loads(r.stdout).get("data") or {}).get("repository") if r.returncode == 0 else None
+        if g:
+            repo.update(allow_squash_merge=g["squashMergeAllowed"], allow_merge_commit=g["mergeCommitAllowed"],
+                        allow_rebase_merge=g["rebaseMergeAllowed"], delete_branch_on_merge=g["deleteBranchOnMerge"])
     branch = repo.get("default_branch", "main")
     prot = gh(f"{base}/branches/{branch}/protection")
     fa = gh(f"{base}/actions/permissions/fork-pr-contributor-approval")

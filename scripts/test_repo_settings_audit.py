@@ -72,6 +72,13 @@ class AuditTest(unittest.TestCase):
         d["repo"]["security_and_analysis"] = None
         self.assertIn("secret-scanning", a.audit(d, set(), False))
 
+    def test_absent_merge_fields_are_reported_not_misread_as_disabled(self):
+        d = good()
+        for k in ("allow_squash_merge", "allow_merge_commit", "allow_rebase_merge", "delete_branch_on_merge"):
+            del d["repo"][k]
+        self.assertEqual(a.audit(d, set(), False)["merge-methods"],
+                         ["merge settings not visible to the token (REST fields absent)"])
+
     def test_unreadable_fork_approval_fails(self):
         d = good()
         d["fork_approval"] = "<unreadable>"
