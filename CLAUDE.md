@@ -13,7 +13,10 @@ here is live in every consumer's *next* CI run — there is no staging.** Theref
 - **Stay backward compatible.** New inputs must have `default:` values; never rename or
   remove an input/secret a caller relies on; don't silently raise the permissions a
   reusable workflow requires (that breaks callers — see below).
-- **This repo has no CI of its own.** Reusable workflows can't run standalone. The only
+- **Reusable workflows can't run standalone.** This repo's CI (`lint-workflows.yml`) runs
+  actionlint, zizmor and `hermes-harness` (`scripts/test-hermes-review.sh`, which runs
+  `hermes-review.yml`'s own steps against a fake `gh` and a fake Hermes); all three are
+  required to merge. For any other workflow, and for a final check of Hermes changes, the
   real test is a consumer: point a throwaway branch in a consumer repo (e.g. `runway`)
   at your feature ref — `uses: s3ntin3l8/.github/.github/workflows/<x>.yml@<your-branch>` —
   open a PR, confirm its checks pass, then revert. Local YAML parsing and shell-snippet
@@ -115,8 +118,8 @@ comment only works once the caller is on `main`.
   can host two jobs) and must not fail open. `ci-python` runs pytest with a throwaway
   `HOME`/XDG root exposed as `TEST_ISOLATION_ROOT`; `test-parallel` (xdist) and
   `ci-node`'s `test-pool` (Vitest) are opt-in speedups. All documented in README.md.
-- **Action versions** are bumped by Dependabot (the `github-actions` ecosystem is
-  configured) — don't hand-pin unless fixing a specific break.
+- **Action versions** are bumped by Dependabot (`.github/dependabot.yml`, the
+  `github-actions` ecosystem) — don't hand-pin unless fixing a specific break.
 
 ## Quick reference: minimal consumer
 
