@@ -39,12 +39,13 @@ When you change what permissions a workflow needs, update the per-workflow
 | `release-please` | `contents: write`, `pull-requests: write` |
 | `ghcr-cleanup` | `packages: write` |
 | `dependency-review` | `contents: read` |
+| `visual-check` | `contents: read`, `pull-requests: write` |
 
 ## Layout
 
 - `.github/workflows/*.yml` — reusable workflows (`workflow_call`): `ci-python`,
   `ci-node`, `ci-go`, `ci-tauri`, `docker-publish`, `codeql`, `release-please`,
-  `ghcr-cleanup`, `dependency-review`.
+  `ghcr-cleanup`, `dependency-review`, `visual-check`.
 - `blueprints/python/` — files to **copy into** a new project (Makefile,
   `pre-commit.yaml`, `pyproject.toml`, README template). These are parallel copies of
   what the **[`python-backend-template`](https://github.com/s3ntin3l8/python-backend-template)**
