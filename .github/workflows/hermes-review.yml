@@ -534,9 +534,10 @@ jobs:
       #     the SHA: a rewrite that leaves the reviewed commit in the PR and changes
       #     nothing still skips, and an "Update branch" merge commit, which brings in
       #     code nobody reviewed, does not. A rewrite that DROPS the reviewed commit from
-      #     the PR (a force-push, a rebase) hides its marker, because markers are read
-      #     from the PR's current commits only: the round then reviews again (a redundant
-      #     review, never a skipped one; s3ntin3l8/.github#136).
+      #     the PR (a force-push, a rebase) still finds its marker: markers are read from
+      #     the PR's newest commits AND from the heads it had before its last force-pushes
+      #     (s3ntin3l8/.github#136). A rebase that changes content then has a base that is
+      #     no longer an ancestor of the head, and the prompt falls back to the full diff.
       #   * Otherwise the delta is R..(current head), so a follow-up round reads only what
       #     changed instead of the whole diff again.
       #
@@ -614,18 +615,24 @@ jobs:
           LAST_REVIEWED=""
           # 1. The ledger: the newest SUCCESS marker paired with a landed review. The
           # PR's last commits, not just the head -- the marker sits on the commit that was
-          # reviewed, which is an older one once the head has moved. A read that fails
+          # reviewed, which is an older one once the head has moved -- plus its pre-force-push
+          # heads (the reviewed commit may no longer be in the PR). A read that fails
           # (no `checks: read`, no ledger) is the same as no marker.
           if [[ "$LEDGER" == "check-run" ]]; then
             QUERY=$(cat <<'GQL'
-          query($owner:String!,$repo:String!,$number:Int!,$name:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){commits(last:50){nodes{commit{oid checkSuites(first:100){nodes{checkRuns(first:20,filterBy:{checkName:$name}){nodes{databaseId name externalId status conclusion startedAt completedAt}}}}}}}}}}
+          query($owner:String!,$repo:String!,$number:Int!,$name:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){commits(last:50){nodes{commit{oid checkSuites(first:100){nodes{checkRuns(first:20,filterBy:{checkName:$name}){nodes{databaseId name externalId status conclusion startedAt completedAt}}}}}}} timelineItems(itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT],last:20){nodes{... on HeadRefForcePushedEvent{beforeCommit{oid checkSuites(first:100){nodes{checkRuns(first:20,filterBy:{checkName:$name}){nodes{databaseId name externalId status conclusion startedAt completedAt}}}}}}}}}}}
           GQL
             )
+            # The heads the PR had BEFORE each force-push count too (#136): a rebase or a
+            # recreated branch drops the reviewed commit from the PR, but its marker stays
+            # on it. `beforeCommit` is null once GitHub has collected the commit, and a
+            # commit that is still in the PR can be listed twice, hence `// empty` and
+            # `unique_by(.id)`.
             # shellcheck disable=SC2016  # $oid is a jq variable, not a shell one
             MARKERS=$(gh api graphql \
               -f query="$QUERY" \
               -F owner="$OWNER" -F repo="${REPO#*/}" -F number="$NUMBER" -f name="$LEDGER_NAME" \
-              --jq '[.data.repository.pullRequest.commits.nodes[] | .commit.oid as $oid | .commit.checkSuites.nodes[].checkRuns.nodes[] | select(.name == env.LEDGER_NAME and .conclusion == "SUCCESS" and .startedAt != null and .completedAt != null) | {oid: $oid, id: .databaseId, started: .startedAt, completed: .completedAt}]' 2>/dev/null || echo "")
+              --jq '[(.data.repository.pullRequest.commits.nodes[].commit), (.data.repository.pullRequest.timelineItems.nodes[]?.beforeCommit // empty)] | [.[] | .oid as $oid | .checkSuites.nodes[].checkRuns.nodes[] | select(.name == env.LEDGER_NAME and .conclusion == "SUCCESS" and .startedAt != null and .completedAt != null) | {oid: $oid, id: .databaseId, started: .startedAt, completed: .completedAt}] | unique_by(.id)' 2>/dev/null || echo "")
             [[ -n "$MARKERS" ]] || MARKERS='[]'
             # Paired: a landed review was submitted WHILE THE RUN RAN -- between the
             # marker's start and the earlier of (its close + 60 s) and (its start + 90
@@ -736,10 +743,13 @@ jobs:
           # "the head moved while a review was running" signal. `commits(last:5)` answers
           # OLDEST first and a commit can carry several markers, so neither the commit nor
           # the marker is taken by position: every marker is flattened and the highest
-          # check-run id (the latest dispatch) wins. The name is filtered server-side and
+          # check-run id (the latest dispatch) wins. The heads the PR had before its last
+          # force-pushes are searched too (#136): a run still live on a head that was
+          # force-pushed away is just as stale, and without them it would be neither
+          # stopped nor skipped and the new review would queue behind it. The name is filtered server-side and
           # the suite window is wide, so a busy commit cannot push the marker out of view.
           QUERY=$(cat <<'GQL'
-          query($owner:String!,$repo:String!,$number:Int!,$name:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){commits(last:5){nodes{commit{oid checkSuites(first:100){nodes{checkRuns(first:20,filterBy:{checkName:$name}){nodes{databaseId name externalId status}}}}}}}}}}
+          query($owner:String!,$repo:String!,$number:Int!,$name:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){commits(last:5){nodes{commit{oid checkSuites(first:100){nodes{checkRuns(first:20,filterBy:{checkName:$name}){nodes{databaseId name externalId status}}}}}}} timelineItems(itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT],last:5){nodes{... on HeadRefForcePushedEvent{beforeCommit{oid checkSuites(first:100){nodes{checkRuns(first:20,filterBy:{checkName:$name}){nodes{databaseId name externalId status}}}}}}}}}}}
           GQL
           )
           # `gh api graphql` takes the repository's NAME, not "owner/repo" (the
@@ -750,7 +760,7 @@ jobs:
           MARKER=$(gh api graphql \
             -f query="$QUERY" \
             -F owner="$OWNER" -F repo="$REPO_NAME" -F number="$NUMBER" -f name="$LEDGER_NAME" \
-            --jq '[.data.repository.pullRequest.commits.nodes[] | .commit.oid as $oid | .commit.checkSuites.nodes[].checkRuns.nodes[] | select(.name == env.LEDGER_NAME and .externalId != null and .externalId != "") | {oid: $oid, id: .databaseId, run: .externalId, open: (.status != "COMPLETED")}] | sort_by(.id) | last // empty')
+            --jq '[(.data.repository.pullRequest.commits.nodes[].commit), (.data.repository.pullRequest.timelineItems.nodes[]?.beforeCommit // empty)] | [.[] | .oid as $oid | .checkSuites.nodes[].checkRuns.nodes[] | select(.name == env.LEDGER_NAME and .externalId != null and .externalId != "") | {oid: $oid, id: .databaseId, run: .externalId, open: (.status != "COMPLETED")}] | sort_by(.id) | last // empty')
           if [[ -z "$MARKER" ]]; then
             exit 0
           fi
