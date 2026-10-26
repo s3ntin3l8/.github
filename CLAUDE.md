@@ -48,7 +48,8 @@ full SHA (not `@main`) so a PR editing the reusable workflow is reviewed by the 
 version. **After changing `hermes-review.yml`, bump that pin** (and add any new
 `secrets:` it declares to the caller's explicit lists). The pin covers only the
 workflow file: the prompts are read from `main` at run time, so a prompt edit is live
-for every consumer on its next run. The on-demand `@s3ntin3l8-hermes Review` comment only works once the caller is on `main`.
+for every consumer on its next run. The on-demand `@s3ntin3l8-hermes Review`
+comment only works once the caller is on `main`.
 
 ## Layout
 

@@ -32,9 +32,10 @@ name: Hermes (review)
 # already-merged version, never by its own unreviewed copy. Bump the pin after
 # changing hermes-review.yml, and add any new `secrets:` that file declares to the
 # explicit lists below (a secret added upstream arrives empty here). The prompts
-# are NOT covered by the pin: the callee reads them from `main`. Needs the HERMES_APP_ID / HERMES_APP_PRIVATE_KEY /
-# HERMES_API_KEY repo secrets and a self-hosted runner for this repo; with the
-# secrets missing, the reusable workflow's Preflight step fails the run.
+# are NOT covered by the pin: the callee reads them from `main`.
+# Needs the HERMES_APP_ID / HERMES_APP_PRIVATE_KEY / HERMES_API_KEY repo secrets
+# and a self-hosted runner for this repo; with the secrets missing, the reusable
+# workflow's Preflight step fails the run.
 on:
   pull_request:
     types: [opened, ready_for_review]
