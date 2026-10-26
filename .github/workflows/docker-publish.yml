@@ -418,6 +418,18 @@ jobs:
           echo "::error::${REGISTRY} login failed after ${attempts} attempts"
           exit 1
 
+      # release-please tags carry the component when `include-component-in-tag` is on
+      # (`aerie-v1.3.0`), which docker/metadata-action's `type=semver` cannot parse. Strip
+      # everything up to the last `-v<digit>`; plain tags (`v1.2.3`, `v3.0.0-beta.14`) have no
+      # such `-v<digit>` and pass through unchanged. Only the image TAGS use the result: the
+      # checkout above still needs the real git tag.
+      - name: Resolve semver from release tag
+        id: semver
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          echo "tag=$(printf '%s' "$RELEASE_TAG" | sed -E 's/^.*-(v[0-9].*)$/\1/')" >> "$GITHUB_OUTPUT"
+
       - name: Extract metadata (tags)
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -425,10 +437,10 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ inputs.image-name }}
           tags: |
             type=raw,value=edge,enable=${{ inputs.push-edge }}
-            type=semver,pattern={{version}},value=${{ inputs.release-tag }},enable=${{ inputs.push-release && inputs.release-channel == 'stable' }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.release-tag }},enable=${{ inputs.push-release && inputs.release-channel == 'stable' }}
+            type=semver,pattern={{version}},value=${{ steps.semver.outputs.tag }},enable=${{ inputs.push-release && inputs.release-channel == 'stable' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.semver.outputs.tag }},enable=${{ inputs.push-release && inputs.release-channel == 'stable' }}
             type=raw,value=latest,enable=${{ inputs.push-release && inputs.release-channel == 'stable' }}
-            type=semver,pattern={{version}},value=${{ inputs.release-tag }},enable=${{ inputs.push-release && inputs.release-channel == 'beta' }}
+            type=semver,pattern={{version}},value=${{ steps.semver.outputs.tag }},enable=${{ inputs.push-release && inputs.release-channel == 'beta' }}
             type=raw,value=beta,enable=${{ inputs.push-release && inputs.release-channel == 'beta' }}
             type=sha,enable=${{ !inputs.push-release }}
 
