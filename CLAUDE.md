@@ -41,9 +41,20 @@ When you change what permissions a workflow needs, update the per-workflow
 | `dependency-review` | `contents: read` |
 | `hermes-review` | `contents: read` (all `gh` calls use the Hermes App token) |
 
+## Hermes reviews this repo's own PRs
+
+`.github/workflows/hermes.yml` is a normal caller of `hermes-review.yml`, pinned to a
+full SHA (not `@main`) so a PR editing the reusable workflow is reviewed by the merged
+version. **After changing `hermes-review.yml`, bump that pin** (and add any new
+`secrets:` it declares to the caller's explicit lists). The pin covers only the
+workflow file: the prompts are read from `main` at run time, so a prompt edit is live
+for every consumer on its next run. The on-demand `@s3ntin3l8-hermes Review`
+comment only works once the caller is on `main`.
+
 ## Layout
 
-- `.github/workflows/*.yml` — reusable workflows (`workflow_call`): `ci-python`,
+- `.github/workflows/*.yml` — reusable workflows (`workflow_call`; `hermes.yml` and
+  `repo-settings-audit.yml` are this repo's own callers/jobs, not reusable): `ci-python`,
   `ci-node`, `ci-go`, `ci-tauri`, `docker-publish`, `codeql`, `release-please`,
   `ghcr-cleanup`, `dependency-review`.
 - `blueprints/python/` — files to **copy into** a new project (Makefile,
