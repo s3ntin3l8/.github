@@ -39,6 +39,7 @@ When you change what permissions a workflow needs, update the per-workflow
 | `release-please` | `contents: write`, `pull-requests: write` |
 | `ghcr-cleanup` | `packages: write` |
 | `dependency-review` | `contents: read` |
+| `hermes-review` | `contents: read` (all `gh` calls use the Hermes App token) |
 
 ## Layout
 

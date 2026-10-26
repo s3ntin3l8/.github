@@ -85,11 +85,12 @@ name: Hermes PR Review (reusable)
 #       # are both automatic in the reusable — no caller-side copy of either is
 #       # required for this on-demand path or for an auto-review `pull_request` path;
 #       # callers don't need to duplicate them.
+#       # contents: read is all a caller needs: every `gh` call below uses the
+#       # Hermes App token, and only actions/checkout (the shared prompt repo)
+#       # uses the caller's GITHUB_TOKEN. Older callers granting write scopes
+#       # still work; those scopes are simply unused.
 #       permissions:
 #         contents: read
-#         pull-requests: write
-#         issues: write
-#         checks: write
 #       uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
 #       with:
 #         mention-trigger: s3ntin3l8-hermes
