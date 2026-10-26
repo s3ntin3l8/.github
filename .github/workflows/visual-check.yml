@@ -24,6 +24,16 @@ on:
         required: false
         type: string
         default: 'visual/.out/check/report'
+      python-version:
+        description: Python for the demo (empty = not installed). Installed with actions/setup-python before the setup hook.
+        required: false
+        type: string
+        default: ''
+      node-version:
+        description: Node for the demo's frontend (empty = not installed). Installed with actions/setup-node before the setup hook.
+        required: false
+        type: string
+        default: ''
       timeout-minutes:
         required: false
         type: number
@@ -55,6 +65,19 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Set up Python
+        if: ${{ inputs.python-version != '' }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ inputs.python-version }}
+          allow-prereleases: true
+
+      - name: Set up Node
+        if: ${{ inputs.node-version != '' }}
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ inputs.node-version }}
 
       - name: Prepare the demo's dependencies
         run: |
