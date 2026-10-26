@@ -40,6 +40,13 @@ When you change what permissions a workflow needs, update the per-workflow
 | `ghcr-cleanup` | `packages: write` |
 | `dependency-review` | `contents: read` |
 
+## Hermes reviews this repo's own PRs
+
+`.github/workflows/hermes.yml` is a normal caller of `hermes-review.yml`, pinned to a
+full SHA (not `@main`) so a PR editing the reusable workflow is reviewed by the merged
+version. **After changing `hermes-review.yml` or the prompts, bump that pin.** The
+on-demand `@s3ntin3l8-hermes Review` comment only works once the caller is on `main`.
+
 ## Layout
 
 - `.github/workflows/*.yml` — reusable workflows (`workflow_call`): `ci-python`,

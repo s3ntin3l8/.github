@@ -1,0 +1,87 @@
+name: Hermes (review)
+
+# Two ways to get a review from the s3ntin3l8-hermes bot:
+#   1. auto-review    -> once per PR: on `opened` if it starts non-draft, or on
+#      `ready_for_review` if it starts as a draft.
+#   2. on-demand-review -> comment "@s3ntin3l8-hermes Review" (or "Triage" on
+#      an issue) any time you want another look, including follow-ups after
+#      the initial auto-review.
+# Both call the same reusable workflow (s3ntin3l8/.github/.github/workflows/
+# hermes-review.yml) with a different `mode`, gated by github.event_name so
+# each job only runs for its own trigger.
+#
+# IMPORTANT: do NOT add `synchronize`. It re-triggers a fresh review on EVERY
+# push, which on a PR under active iteration is an unbounded review loop (each
+# review's comments prompt more commits, each commit fires another review).
+# `ready_for_review` is safe alongside `opened`: repeat events are bounded by
+# the reusable workflow's own "Guard against re-trigger (auto mode only)" step,
+# which skips the run once this bot already has a non-dismissed review.
+#
+# SECURITY: this repo is public and the reusable workflow runs on a self-hosted
+# runner. For a `pull_request` event, GitHub runs the workflow FILE from the PR's
+# own head ref, so a fork PR can edit or delete the `head.repo.full_name` guard
+# below (or re-point `uses:`). That guard is therefore NOT the trust boundary; it
+# only catches accidents. The real control is the repo setting Settings ->
+# Actions -> General -> "Require approval for all outside collaborators", which
+# must stay on: the runner (filesystem, LAN access) is what is at stake, not the
+# token (fork PRs get no secrets and a read-only token). The on-demand path is
+# unaffected: `issue_comment` always runs the DEFAULT BRANCH's copy of this file,
+# so the author_association gate there is sufficient on its own.
+# NOTE (this repo hosts the reusable workflow): the `uses:` below is pinned to a
+# full SHA on purpose, so a PR that edits hermes-review.yml is reviewed by the
+# already-merged version, never by its own unreviewed copy. Bump the pin after
+# changing hermes-review.yml. Needs the HERMES_APP_ID / HERMES_APP_PRIVATE_KEY /
+# HERMES_API_KEY repo secrets and a self-hosted runner for this repo; without the
+# secrets the reusable workflow's Preflight step skips with a notice.
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  issue_comment:
+    types: [created]
+    # Covers both PR-conversation comments and issue comments. The reusable
+    # workflow's "Check mention" step enforces the "@s3ntin3l8-hermes" substring
+    # in on-demand mode (default), so a plain comment without the mention is a
+    # cheap no-op, not a review.
+
+jobs:
+  # Excludes by PR *author* (not github.actor): on `ready_for_review`, actor is
+  # whoever clicked "Ready for review", not necessarily who opened the PR.
+  #
+  # Dependabot PRs are not excluded, but a dependabot-authored run only sees the
+  # *Dependabot* secret store. Without HERMES_APP_ID, HERMES_APP_PRIVATE_KEY and
+  # HERMES_API_KEY there, the reusable workflow skips green with a notice.
+  # Mirroring them is a trust decision (the run executes the PR's own workflow
+  # copy on a LAN-reachable runner), so they are not set here.
+  auto-review:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 's3ntin3l8-hermes[bot]' &&
+      github.event.pull_request.draft == false
+    permissions:
+      contents: read # all gh calls in the callee use the Hermes App token
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@5ee8c679d580f66286eff4176d7fac43459392f5 # main
+    with:
+      mode: auto # review on trigger, no @mention needed
+      mention-trigger: s3ntin3l8-hermes
+      # Dispatch through Hermes' Runs API and poll the run to a terminal status,
+      # so the check goes red when the review fails instead of turning green the
+      # moment the request is accepted.
+      hermes-use-runs: true
+    secrets: inherit # pragma: allowlist secret
+
+  on-demand-review:
+    # Trusted-commenter gate: otherwise any user on this public repo could post
+    # "@s3ntin3l8-hermes" and trigger a run that inherits the HERMES_* secrets
+    # and executes on the self-hosted runner.
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.actor != 's3ntin3l8-hermes[bot]' &&
+      contains(fromJSON('["MEMBER", "OWNER", "COLLABORATOR"]'), github.event.comment.author_association)
+    permissions:
+      contents: read # all gh calls in the callee use the Hermes App token
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@5ee8c679d580f66286eff4176d7fac43459392f5 # main
+    with:
+      mention-trigger: s3ntin3l8-hermes # mode: on-demand is the reusable workflow's default
+      hermes-use-runs: true
+    secrets: inherit # pragma: allowlist secret
