@@ -30,9 +30,11 @@ name: Hermes (review)
 # NOTE (this repo hosts the reusable workflow): the `uses:` below is pinned to a
 # full SHA on purpose, so a PR that edits hermes-review.yml is reviewed by the
 # already-merged version, never by its own unreviewed copy. Bump the pin after
-# changing hermes-review.yml. Needs the HERMES_APP_ID / HERMES_APP_PRIVATE_KEY /
-# HERMES_API_KEY repo secrets and a self-hosted runner for this repo; without the
-# secrets the reusable workflow's Preflight step skips with a notice.
+# changing hermes-review.yml, and add any new `secrets:` that file declares to the
+# explicit lists below (a secret added upstream arrives empty here). The prompts
+# are NOT covered by the pin: the callee reads them from `main`. Needs the HERMES_APP_ID / HERMES_APP_PRIVATE_KEY /
+# HERMES_API_KEY repo secrets and a self-hosted runner for this repo; with the
+# secrets missing, the reusable workflow's Preflight step fails the run.
 on:
   pull_request:
     types: [opened, ready_for_review]
@@ -49,7 +51,8 @@ jobs:
   #
   # Dependabot PRs are not excluded, but a dependabot-authored run only sees the
   # *Dependabot* secret store. Without HERMES_APP_ID, HERMES_APP_PRIVATE_KEY and
-  # HERMES_API_KEY there, the reusable workflow skips green with a notice.
+  # HERMES_API_KEY there, the reusable workflow skips green with a notice. (Any
+  # other run with those secrets missing FAILS in the reusable's Preflight step.)
   # Mirroring them is a trust decision (the run executes the PR's own workflow
   # copy on a LAN-reachable runner), so they are not set here.
   auto-review:
@@ -60,7 +63,7 @@ jobs:
       github.event.pull_request.draft == false
     permissions:
       contents: read # all gh calls in the callee use the Hermes App token
-    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@5ee8c679d580f66286eff4176d7fac43459392f5 # main
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@8db15530e0831c9a584cd18f736ef4f8a147b856 # pinned 2026-10-26
     with:
       mode: auto # review on trigger, no @mention needed
       mention-trigger: s3ntin3l8-hermes
@@ -84,7 +87,7 @@ jobs:
       contains(fromJSON('["MEMBER", "OWNER", "COLLABORATOR"]'), github.event.comment.author_association)
     permissions:
       contents: read # all gh calls in the callee use the Hermes App token
-    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@5ee8c679d580f66286eff4176d7fac43459392f5 # main
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@8db15530e0831c9a584cd18f736ef4f8a147b856 # pinned 2026-10-26
     with:
       mention-trigger: s3ntin3l8-hermes # mode: on-demand is the reusable workflow's default
       hermes-use-runs: true
