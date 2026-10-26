@@ -125,7 +125,7 @@ centralized-prompt, reusable design. See [`s3ntin3l8/.github` #18](https://githu
 - **PR mention** → diff review (uses [`hermes-review-prompt.md`](hermes-review-prompt.md)).
 - **Issue mention** → triage; may open a *draft* PR that **Closes #N** and is presented
   for human approval (uses [`hermes-triage-prompt.md`](hermes-triage-prompt.md)).
-- **Caller permissions (required):** `contents: write`, `pull-requests: write`, `issues: write`, `checks: write`.
+- **Caller permissions (required):** `contents: read` only. Every `gh` call uses the Hermes App token (it requests its own `checks`/`issues`/`pull-requests` scopes); the caller's `GITHUB_TOKEN` is used only by `actions/checkout` of the shared prompt repo. Callers that still grant the four write scopes keep working; the extra scopes are unused and can be dropped.
 - **Secrets:** `HERMES_APP_ID`, `HERMES_APP_PRIVATE_KEY` (used by the runner to resolve the PR/issue for routing), and `HERMES_API_KEY` (bearer key for the hermes-01 API server) — pass via `secrets: inherit`. To auto-review **dependabot** PRs (the default), mirror the same three secrets into the repo's **Settings → Secrets and variables → Dependabot**: a dependabot-authored `pull_request` run sees only those. Without them the run skips green with a notice rather than failing.
 - **Auto-review skips:** bot authors `s3ntin3l8-hermes[bot]` (self) and `github-actions[bot]` (release-please), fork PRs, and `mullion/task-*` branches. `dependabot[bot]` is reviewed — a bump can change a runtime tool version without saying so (runway-ai-usage-tracker#627).
 - **Variables:** `HERMES_MODEL` (optional model override).

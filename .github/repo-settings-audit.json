@@ -1,0 +1,12 @@
+{
+  "_doc": "Intentional differences from the audit's policy. Keys: check id -> repo name -> reason. Prefer fixing the setting; add an exception only with a reason. Forks are skipped for branch-protection and merge-methods in code.",
+  "exceptions": {
+    "branch-protection": {
+      "go-http-template": "templates keep unprotected default branches: they are copied from, not deployed",
+      "python-backend-template": "templates keep unprotected default branches: they are copied from, not deployed",
+      "node-backend-template": "templates keep unprotected default branches: they are copied from, not deployed",
+      "mobile-app-template": "templates keep unprotected default branches: they are copied from, not deployed",
+      "tauri-app-template": "templates keep unprotected default branches: they are copied from, not deployed"
+    }
+  }
+}
