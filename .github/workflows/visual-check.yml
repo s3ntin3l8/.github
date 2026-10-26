@@ -34,6 +34,13 @@ on:
         required: false
         type: string
         default: ''
+      blocking:
+        description: >-
+          Advisory by default: the job never turns the caller's check red (a broken demo shows as a comment
+          saying there is no report). Set true to let a failure fail the check, e.g. once the repo trusts it.
+        required: false
+        type: boolean
+        default: false
       timeout-minutes:
         required: false
         type: number
@@ -58,6 +65,8 @@ jobs:
   visual-check:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
+    # A job that calls a reusable workflow cannot set continue-on-error itself, so "advisory" lives here.
+    continue-on-error: ${{ !inputs.blocking }}
     permissions:
       contents: read
       pull-requests: write

@@ -108,7 +108,7 @@ Checks for vulnerable dependencies and license policy violations in PRs.
 ### [Visual-Check](.github/workflows/visual-check.yml)
 Renders a repo's touched routes on the merge base and on the PR in the pinned [visual-kit](https://github.com/s3ntin3l8/visual-kit) image, diffs them (pixels, axe, console errors, overflow, unnamed controls), uploads the report and keeps one sticky PR comment up to date (one run per PR at a time, a newer push cancels the older run). Advisory: it reports, it does not gate. The repo provides `make visual-check` (see visual-kit's `CONTRACT.md`).
 - **Caller permissions:** `contents: read`, `pull-requests: write` (without them the run fails at startup with zero jobs). A caller that never runs on `pull_request` cannot avoid the write scope either: permissions are validated for the whole called workflow, even for steps that are skipped.
-- **Inputs:** `target` (default `visual-check`), `routes` (default empty = every scene tagged `check`), `report-path` (default `visual/.out/check/report`), `python-version` / `node-version` (default empty = not installed; `actions/setup-python` / `actions/setup-node` run before the setup hook), `timeout-minutes` (default `30`), `retention-days` (default `14`).
+- **Inputs:** `target` (default `visual-check`), `routes` (default empty = every scene tagged `check`), `report-path` (default `visual/.out/check/report`), `python-version` / `node-version` (default empty = not installed; `actions/setup-python` / `actions/setup-node` run before the setup hook), `blocking` (default `false`: advisory, the job never turns the caller's check red; `true` lets a failure fail it), `timeout-minutes` (default `30`), `retention-days` (default `14`).
 - **Setup hook:** `.github/visual-setup.sh`, if the repo has one, installs what the demo needs before the check. There is no command-string input, same convention as `ci-go`'s `.github/ci-prebuild.sh`.
 - **Expects:** Docker (present on `ubuntu-latest`) and a demo that boots in a clean checkout. The comment step is skipped for fork PRs (read-only token).
 
@@ -116,7 +116,6 @@ Renders a repo's touched routes on the merge base and on the PR in the pinned [v
 jobs:
   visual-check:
     if: ${{ github.event.pull_request.draft == false }}
-    continue-on-error: true # advisory: a red check here must not become a gate
     permissions:
       contents: read
       pull-requests: write
