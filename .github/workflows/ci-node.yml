@@ -144,6 +144,21 @@ on:
         required: false
         type: boolean
         default: true
+      next-cache:
+        description: >-
+          Cache Next.js's build cache (`**/.next/cache` under working-directory)
+          across CI runs, so `next build` reuses compiled output and the
+          optimised-image cache instead of starting cold. Keyed by the lockfile
+          plus a hash of the JS/TS sources, with restore-key fallbacks to the
+          same lockfile and then the OS: this is the layout Next.js documents,
+          and a partial hit is safe because Next validates its own cache
+          entries. On by default for the same reason as `turbo-cache`:
+          `actions/cache` no-ops on a path that doesn't exist, so a caller
+          without Next.js pays only a cheap cache-miss check. Set to `false`
+          to opt out (e.g. when Turborepo already restores `.next`).
+        required: false
+        type: boolean
+        default: true
       strict-checks:
         description: >-
           Fail the job on detect-secrets findings instead of reporting them
@@ -265,6 +280,15 @@ jobs:
           key: turbo-${{ runner.os }}-${{ github.sha }}
           restore-keys: |
             turbo-${{ runner.os }}-
+      - name: Cache Next.js build
+        if: ${{ inputs.next-cache }}
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.WD_PREFIX }}**/.next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles(inputs.cache-dependency-path) }}-${{ hashFiles('**/*.js', '**/*.jsx', '**/*.ts', '**/*.tsx', '!**/node_modules/**', '!**/.next/**') }}
+          restore-keys: |
+            nextjs-${{ runner.os }}-${{ hashFiles(inputs.cache-dependency-path) }}-
+            nextjs-${{ runner.os }}-
       - name: Install dependencies
         run: npm ci
       # Opt-in on file presence (same convention as ci-python.yml): a repo gets
@@ -563,6 +587,15 @@ jobs:
           key: turbo-${{ runner.os }}-${{ github.sha }}
           restore-keys: |
             turbo-${{ runner.os }}-
+      - name: Cache Next.js build
+        if: ${{ inputs.next-cache }}
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ format('{0}/', inputs.working-directory) }}**/.next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles(inputs.cache-dependency-path) }}-${{ hashFiles('**/*.js', '**/*.jsx', '**/*.ts', '**/*.tsx', '!**/node_modules/**', '!**/.next/**') }}
+          restore-keys: |
+            nextjs-${{ runner.os }}-${{ hashFiles(inputs.cache-dependency-path) }}-
+            nextjs-${{ runner.os }}-
       - name: Install dependencies
         run: npm ci
       # lint-and-test's Lint/Typecheck steps get workspace dependencies built for
