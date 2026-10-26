@@ -1,0 +1,15 @@
+# Dependabot for THIS repo. The dependabot.yml at the repo root is the org-wide template
+# other repos copy; Dependabot only reads .github/dependabot.yml, so without this file
+# nothing bumps the action pins in the workflows here.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns:
+          - "*"
