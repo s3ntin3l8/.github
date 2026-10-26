@@ -1,0 +1,156 @@
+name: Visual check
+
+# Renders a repo's touched routes on the merge base and on the PR, diffs them, and reports.
+# The mechanics live in s3ntin3l8/visual-kit (the repo's `make visual-check`, see its CONTRACT.md);
+# this workflow only provides the runner, the history the base needs, the artifact and one sticky
+# PR comment. Advisory by design: the job reports, it does not gate.
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: >-
+          Make target that runs the check. It receives BASE=origin/<base branch> (and ROUTES= when set)
+          and must leave its report in `report-path`.
+        required: false
+        type: string
+        default: 'visual-check'
+      routes:
+        description: Comma-separated scene names or paths to check (empty = every scene tagged `check`).
+        required: false
+        type: string
+        default: ''
+      report-path:
+        description: Folder the target writes the report to (index.html, summary.md), relative to the repo root.
+        required: false
+        type: string
+        default: 'visual/.out/check/report'
+      python-version:
+        description: Python for the demo (empty = not installed). Installed with actions/setup-python before the setup hook.
+        required: false
+        type: string
+        default: ''
+      node-version:
+        description: Node for the demo's frontend (empty = not installed). Installed with actions/setup-node before the setup hook.
+        required: false
+        type: string
+        default: ''
+      blocking:
+        description: >-
+          Advisory by default: the job never turns the caller's check red (a broken demo shows as a comment
+          saying there is no report). Set true to let a failure fail the check, e.g. once the repo trusts it.
+        required: false
+        type: boolean
+        default: false
+      timeout-minutes:
+        required: false
+        type: number
+        default: 30
+      retention-days:
+        description: How long the report artifact is kept.
+        required: false
+        type: number
+        default: 14
+
+# One run per PR: a push while the previous check still renders cancels it, so two runs never race to post the
+# sticky comment. The group name is deliberately not the caller's (`<workflow>-<ref>`): the same name in both
+# would make the called run cancel its own caller.
+concurrency:
+  group: visual-check-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  cancel-in-progress: true
+
+# Dependencies the demo needs are installed by `.github/visual-setup.sh` when the repo has one
+# (reviewable and version-controlled, same convention hook as ci-go's `.github/ci-prebuild.sh`):
+# there is deliberately no command-string input.
+jobs:
+  visual-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # A job that calls a reusable workflow cannot set continue-on-error itself, so "advisory" lives here.
+    continue-on-error: ${{ !inputs.blocking }}
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      TARGET: ${{ inputs.target }}
+      ROUTES: ${{ inputs.routes }}
+      REPORT_PATH: ${{ inputs.report-path }}
+      BASE_REF: ${{ github.base_ref }}
+    steps:
+      - name: Checkout (full history, because the base is the merge base)
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        if: ${{ inputs.python-version != '' }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Set up Node
+        if: ${{ inputs.node-version != '' }}
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Prepare the demo's dependencies
+        run: |
+          if [ -f .github/visual-setup.sh ]; then
+            bash .github/visual-setup.sh
+          else
+            echo "No .github/visual-setup.sh: assuming the target needs nothing beyond Docker."
+          fi
+
+      - name: Visual check
+        run: |
+          set -euo pipefail
+          args=("BASE=origin/${BASE_REF:-main}")
+          if [ -n "$ROUTES" ]; then args+=("ROUTES=$ROUTES"); fi
+          make "$TARGET" "${args[@]}"
+
+      - name: Upload the report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: visual-check-report
+          path: ${{ inputs.report-path }}
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: ignore
+
+      - name: Comment the summary on the PR
+        # A fork's token is read-only, and its code is not ours to report on.
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          marker='<!-- visual-kit:check -->'
+          summary="$REPORT_PATH/summary.md"
+          if [ -f "$summary" ]; then
+            # An issue comment holds at most 65536 characters: cut at 60000 bytes and let iconv drop a
+            # multi-byte character the cut may have split (the API rejects invalid UTF-8).
+            # iconv -c drops the split character but still exits 1 on an incomplete tail, which pipefail
+            # would turn into a failed step; the valid prefix on stdout is what we want.
+            body=$(head -c 60000 "$summary" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null || true)
+            if [ "$(wc -c < "$summary")" -gt 60000 ]; then
+              body="$body"$'\n\n'"_(summary truncated; the full report is in the artifact)_"
+            fi
+          else
+            body="## Visual check"$'\n\n'"The check produced no report; see the run log."
+          fi
+          body="$marker"$'\n'"$body"$'\n\n'"[Full report (before / after / diff)]($RUN_URL) is the \`visual-check-report\` artifact of this run."
+          # Collect first, then take the first line: `gh api --paginate | head -n1` takes SIGPIPE (141) once head
+          # exits while gh still has pages to write, which `set -o pipefail` turns into a failed step. Only the
+          # Actions bot's own comment counts: a collaborator's comment with the same prefix must not be PATCHed.
+          ids=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id")
+          id=${ids%%$'\n'*}
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -f body="$body" --silent
+          else
+            gh api "repos/$REPO/issues/$PR/comments" -f body="$body" --silent
+          fi

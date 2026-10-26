@@ -105,6 +105,23 @@ Checks for vulnerable dependencies and license policy violations in PRs.
 - **Caller permissions:** `contents: read`.
 - **Inputs:** none.
 
+### [Visual-Check](.github/workflows/visual-check.yml)
+Renders a repo's touched routes on the merge base and on the PR in the pinned [visual-kit](https://github.com/s3ntin3l8/visual-kit) image, diffs them (pixels, axe, console errors, overflow, unnamed controls), uploads the report and keeps one sticky PR comment up to date (one run per PR at a time, a newer push cancels the older run). Advisory: it reports, it does not gate. The repo provides `make visual-check` (see visual-kit's `CONTRACT.md`).
+- **Caller permissions:** `contents: read`, `pull-requests: write` (without them the run fails at startup with zero jobs). A caller that never runs on `pull_request` cannot avoid the write scope either: permissions are validated for the whole called workflow, even for steps that are skipped.
+- **Inputs:** `target` (default `visual-check`), `routes` (default empty = every scene tagged `check`), `report-path` (default `visual/.out/check/report`), `python-version` / `node-version` (default empty = not installed; `actions/setup-python` / `actions/setup-node` run before the setup hook), `blocking` (default `false`: advisory, the job never turns the caller's check red; `true` lets a failure fail it), `timeout-minutes` (default `30`), `retention-days` (default `14`).
+- **Setup hook:** `.github/visual-setup.sh`, if the repo has one, installs what the demo needs before the check. There is no command-string input, same convention as `ci-go`'s `.github/ci-prebuild.sh`.
+- **Expects:** Docker (present on `ubuntu-latest`) and a demo that boots in a clean checkout. The comment step is skipped for fork PRs (read-only token). Call it from a `pull_request` workflow: a run triggered by `issue_comment` checks out the default branch, so it would compare `main` with itself and report nothing changed.
+
+```yaml
+jobs:
+  visual-check:
+    if: ${{ github.event.pull_request.draft == false }}
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: s3ntin3l8/.github/.github/workflows/visual-check.yml@main
+```
+
 ### [Claude-Code](.github/workflows/claude-code.yml)
 On-demand `@claude` assistant for issues and PRs (review + implement), shared so the gate and prompt cannot drift between repos.
 - **Caller permissions (required):** `contents: read`, `pull-requests: write`, `issues: read`, `id-token: write`, `actions: read`.
