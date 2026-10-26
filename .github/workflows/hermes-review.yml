@@ -748,8 +748,9 @@ jobs:
           # force-pushes are searched too (#136): a run still live on a head that was
           # force-pushed away is just as stale, and without them it would be neither
           # stopped nor skipped and the new review would queue behind it. Only the last 5
-          # force-pushes (the scope step reads 20): a run lives at most as long as the job
-          # timeout, so only the newest heads can still carry a live one. The name is filtered server-side and
+          # force-pushes are read here (the scope step reads 20): a run lasts at most about
+          # the job timeout, so it is missed only if the PR is force-pushed 5 or more
+          # times while that one run is working. The name is filtered server-side and
           # the suite window is wide, so a busy commit cannot push the marker out of view.
           QUERY=$(cat <<'GQL'
           query($owner:String!,$repo:String!,$number:Int!,$name:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){commits(last:5){nodes{commit{oid checkSuites(first:100){nodes{checkRuns(first:20,filterBy:{checkName:$name}){nodes{databaseId name externalId status}}}}}}} timelineItems(itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT],last:5){nodes{... on HeadRefForcePushedEvent{beforeCommit{oid checkSuites(first:100){nodes{checkRuns(first:20,filterBy:{checkName:$name}){nodes{databaseId name externalId status}}}}}}}}}}}
