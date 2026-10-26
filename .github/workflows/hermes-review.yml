@@ -555,9 +555,10 @@ jobs:
       # marker) it falls back to the last landed review's `commit_id` -- but only while
       # that commit is not newer than the review itself; a newer one was re-pointed, so
       # nothing is known about what was covered and the whole diff is reviewed.
-      # Mullion's relay applies the same rule: both feed the same range into the
-      # idempotency key, so they have to agree or the two entry points stop
-      # deduplicating against each other.
+      # Mullion's relay must apply the same rule -- including the force-push heads
+      # (its `listReviewMarkers`, s3ntin3l8/mullion-session-manager): both feed the same
+      # range into the idempotency key, so they have to agree or the two entry points
+      # stop deduplicating against each other.
       #
       # Only a PR has a commit to pin; an issue triage (and a caller that asked for
       # "full" scope) has no head, no delta and no "already reviewed" skip.
@@ -746,7 +747,9 @@ jobs:
           # check-run id (the latest dispatch) wins. The heads the PR had before its last
           # force-pushes are searched too (#136): a run still live on a head that was
           # force-pushed away is just as stale, and without them it would be neither
-          # stopped nor skipped and the new review would queue behind it. The name is filtered server-side and
+          # stopped nor skipped and the new review would queue behind it. Only the last 5
+          # force-pushes (the scope step reads 20): a run lives at most as long as the job
+          # timeout, so only the newest heads can still carry a live one. The name is filtered server-side and
           # the suite window is wide, so a busy commit cannot push the marker out of view.
           QUERY=$(cat <<'GQL'
           query($owner:String!,$repo:String!,$number:Int!,$name:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){commits(last:5){nodes{commit{oid checkSuites(first:100){nodes{checkRuns(first:20,filterBy:{checkName:$name}){nodes{databaseId name externalId status}}}}}}} timelineItems(itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT],last:5){nodes{... on HeadRefForcePushedEvent{beforeCommit{oid checkSuites(first:100){nodes{checkRuns(first:20,filterBy:{checkName:$name}){nodes{databaseId name externalId status}}}}}}}}}}}
