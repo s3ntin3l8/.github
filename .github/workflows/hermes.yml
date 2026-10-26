@@ -68,7 +68,11 @@ jobs:
       # so the check goes red when the review fails instead of turning green the
       # moment the request is accepted.
       hermes-use-runs: true
-    secrets: inherit # pragma: allowlist secret
+    # Explicit, not `inherit` (zizmor secrets-inherit): pass only what the callee uses.
+    secrets:
+      HERMES_APP_ID: ${{ secrets.HERMES_APP_ID }}
+      HERMES_APP_PRIVATE_KEY: ${{ secrets.HERMES_APP_PRIVATE_KEY }} # pragma: allowlist secret
+      HERMES_API_KEY: ${{ secrets.HERMES_API_KEY }} # pragma: allowlist secret
 
   on-demand-review:
     # Trusted-commenter gate: otherwise any user on this public repo could post
@@ -84,4 +88,8 @@ jobs:
     with:
       mention-trigger: s3ntin3l8-hermes # mode: on-demand is the reusable workflow's default
       hermes-use-runs: true
-    secrets: inherit # pragma: allowlist secret
+    # Explicit, not `inherit` (zizmor secrets-inherit): pass only what the callee uses.
+    secrets:
+      HERMES_APP_ID: ${{ secrets.HERMES_APP_ID }}
+      HERMES_APP_PRIVATE_KEY: ${{ secrets.HERMES_APP_PRIVATE_KEY }} # pragma: allowlist secret
+      HERMES_API_KEY: ${{ secrets.HERMES_API_KEY }} # pragma: allowlist secret
