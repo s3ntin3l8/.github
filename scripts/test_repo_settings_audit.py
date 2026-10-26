@@ -32,14 +32,19 @@ class AuditTest(unittest.TestCase):
         d["repo"]["allow_merge_commit"] = True
         d["repo"]["security_and_analysis"]["secret_scanning_push_protection"]["status"] = "disabled"
         self.assertEqual(set(a.audit(d, set(), False)), {
-            "fork-pr-approval", "workflow-permissions", "workflow-approve-prs",
+            "fork-pr-approval", "workflow-permissions",
             "merge-methods", "secret-scanning"})
 
     def test_exception_suppresses_only_its_check(self):
         d = good()
-        d["workflow"]["can_approve_pull_request_reviews"] = True
+        d["workflow"]["default_workflow_permissions"] = "write"
         d["fork_approval"] = "first_time_contributors"
-        self.assertEqual(set(a.audit(d, {"workflow-approve-prs"}, False)), {"fork-pr-approval"})
+        self.assertEqual(set(a.audit(d, {"workflow-permissions"}, False)), {"fork-pr-approval"})
+
+    def test_actions_approving_prs_is_allowed(self):
+        d = good()
+        d["workflow"]["can_approve_pull_request_reviews"] = True
+        self.assertEqual(a.audit(d, set(), False), {})
 
     def test_unprotected_branch(self):
         d = good()

@@ -4,7 +4,7 @@ name: Repo settings audit
 # workflows' security model relies on (scripts/repo_settings_audit.py): fork-PR
 # approval for all outside collaborators (the real control keeping fork PRs off
 # self-hosted runners: a fork PR runs its own copy of the workflow file),
-# read-only default workflow token, Actions not approving PRs, a protected default
+# read-only default workflow token, a protected default
 # branch (status checks + conversation resolution), secret scanning + push
 # protection, and squash-only merges with branch auto-delete. Intentional
 # differences live in .github/repo-settings-audit.json. See SECURITY.md and

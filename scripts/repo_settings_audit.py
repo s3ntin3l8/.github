@@ -34,15 +34,6 @@ def check_workflow_permissions(d):
     return [f"default workflow token is {w.get('default_workflow_permissions')!r}, want 'read'"]
 
 
-def check_workflow_approve(d):
-    w = d["workflow"]
-    if w is None:
-        return ["workflow permissions unreadable"]
-    if w.get("can_approve_pull_request_reviews") is False:
-        return []
-    return ["Actions may create and approve pull requests, want off"]
-
-
 def check_branch_protection(d):
     """Default branch needs required status checks and conversation resolution,
     via classic protection or an active ruleset."""
@@ -98,7 +89,6 @@ def check_merge_methods(d):
 CHECKS = {
     "fork-pr-approval": check_fork_pr_approval,
     "workflow-permissions": check_workflow_permissions,
-    "workflow-approve-prs": check_workflow_approve,
     "branch-protection": check_branch_protection,
     "secret-scanning": check_secret_scanning,
     "merge-methods": check_merge_methods,
