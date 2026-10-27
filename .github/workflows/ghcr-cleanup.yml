@@ -10,6 +10,16 @@ name: Cleanup GHCR
 # can never clear and risks clipping a child of an older tag, breaking it on one
 # architecture. This action parses the manifest lists, deletes only genuinely
 # dangling digests, and validates that every surviving tag still resolves.
+#
+# Two kinds of *tagged* leftovers need their own rule, because the untagged sweep
+# never sees them:
+#   - `sha-<shortsha>` build tags (one per edge build): keep the newest N.
+#   - `audit-<run>-<attempt>` candidate tags from docker-publish's `audit-command`
+#     flow. They stay on the audited digest after it is promoted; on a superseded
+#     :edge build or a failed audit they are the image's only tag and keep it alive
+#     forever. `delete-tags` on a tag whose image has other tags only unlinks the
+#     tag; the image goes (with its per-arch children, attestations and cosign
+#     signature) only when that was its last tag.
 
 on:
   workflow_call:
@@ -45,6 +55,14 @@ on:
         required: false
         type: number
         default: 10
+      # docker-publish's `audit-command` flow tags the candidate `audit-<run>-<attempt>`
+      # and never removes it (see the header). Keep it long enough to inspect a failed
+      # audit; the evidence artifact itself lives 90 days in Actions.
+      audit-retention:
+        description: 'How long to keep audit-<run>-<attempt> candidate tags, e.g. "7 days"'
+        required: false
+        type: string
+        default: '7 days'
 
 jobs:
   cleanup:
@@ -74,5 +92,17 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           delete-tags: 'sha-*'
           keep-n-tagged: ${{ inputs.keep-n-sha-tagged }}
+          validate: true
+          dry-run: ${{ inputs.dry-run }}
+
+      # The `audit-*` tag is dropped from a promoted image (it keeps its release/edge
+      # tags) and takes a superseded or failed-audit image with it once it is old enough.
+      - name: Prune old audit candidate tags
+        uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f
+        with:
+          package: ${{ inputs.package-name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          delete-tags: 'audit-*'
+          older-than: ${{ inputs.audit-retention }}
           validate: true
           dry-run: ${{ inputs.dry-run }}
