@@ -74,9 +74,14 @@ jobs:
       with:
         languages: ${{ matrix.language }}
         queries: ${{ inputs.queries }}
-
-    - name: Autobuild
-      uses: github/codeql-action/autobuild@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        # `none` only for the languages listed here (no build step needed, or none
+        # possible). Everything else keeps `autobuild`, exactly what the standalone
+        # step did before, even where upstream also supports `none` (c-cpp, csharp,
+        # java-kotlin): don't flip one of those without a canary, since it changes
+        # what gets analysed. Replaces the `codeql-action/autobuild` step, which
+        # upstream no longer recommends since v4. The language list is a runtime
+        # matrix, so this stays an expression rather than a `matrix.include`.
+        build-mode: ${{ contains(fromJSON('["javascript-typescript","javascript","typescript","python","ruby","actions","rust"]'), matrix.language) && 'none' || 'autobuild' }}
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
