@@ -411,7 +411,8 @@ jobs:
           # `.sig` tag; images signed before this move keep their `.sig` tag and still
           # verify with v3 (#153). v3.1.3 is the release the other signing paths
           # (runway's release pipeline) already run, and it is patched for
-          # GHSA-fx35-mq7g-6g98.
+          # GHSA-fx35-mq7g-6g98. This is an input string, not a `uses:` ref, so
+          # Dependabot never bumps it: raise it by hand.
           cosign-release: 'v3.1.3'
 
       # See the build job's identically-named step for why this isn't
@@ -480,12 +481,12 @@ jobs:
 
       - name: Sign the published Docker image
         env:
-          TAGS: ${{ steps.meta.outputs.tags }}
           VERSION: ${{ steps.meta.outputs.version }}
           IMAGE_NAME: ${{ inputs.image-name }}
         run: |
           DIGEST=$(docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${VERSION}" \
             --format '{{json .Manifest.Digest}}' | tr -d '"')
-          while IFS= read -r tag; do
-            cosign sign --yes "${tag}@${DIGEST}"
-          done <<< "$TAGS"
+          # A signature belongs to the digest, not to a tag, and every tag points at this
+          # one manifest list. cosign v3 writes one referrer per invocation, so signing
+          # once per tag would leave duplicate signatures on the same digest.
+          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
