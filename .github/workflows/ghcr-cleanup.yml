@@ -11,16 +11,15 @@ name: Cleanup GHCR
 # architecture. This action parses the manifest lists, deletes only genuinely
 # dangling digests, and validates that every surviving tag still resolves.
 #
-# Three kinds of *tagged* leftovers need their own rule, because the untagged sweep
+# Two kinds of *tagged* leftovers need their own rule, because the untagged sweep
 # never sees them:
 #   - `sha-<shortsha>` build tags (one per edge build): keep the newest N.
 #   - `audit-<run>-<attempt>` candidate tags from docker-publish's `audit-command`
 #     flow. They stay on the audited digest after it is promoted; on a superseded
 #     :edge build or a failed audit they are the image's only tag and keep it alive
 #     forever. `delete-tags` on a tag whose image has other tags only unlinks the
-#     tag; the image goes only when that was its last tag.
-#   - cosign signatures and OCI-referrer tags (`sha256-<digest>[.sig]`): tagged, so
-#     they outlive the image they sign. Swept last, once the images are gone.
+#     tag; the image goes (with its per-arch children, attestations and cosign
+#     signature) only when that was its last tag.
 
 on:
   workflow_call:
@@ -105,17 +104,5 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           delete-tags: 'audit-*'
           older-than: ${{ inputs.audit-retention }}
-          validate: true
-          dry-run: ${{ inputs.dry-run }}
-
-      # Last, so the images deleted above are already gone when parents are looked up.
-      # No other delete rule here: this step only removes tagged signature / referrer
-      # artifacts whose parent image no longer exists.
-      - name: Prune orphaned signatures
-        uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f
-        with:
-          package: ${{ inputs.package-name }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          delete-orphaned-images: true
           validate: true
           dry-run: ${{ inputs.dry-run }}

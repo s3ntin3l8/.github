@@ -99,7 +99,7 @@ Automated versioning and changelogs.
 - **Optional secrets `RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY`** (opt-in, pass via `secrets: inherit`): a dedicated GitHub App (Contents, Pull requests, Workflows: read & write) that creates the GitHub Release + tag. Without it, `GITHUB_TOKEN` can only tag the default branch's HEAD, so one failed release-PR-merge run wedges every later run on a 403 until an operator runs `gh release create` by hand. With it, the release runs as the App while the release PR is still opened by `github-actions[bot]` (so Hermes auto-review and PR CI are unaffected). Note an App-created release fires `on: release` / `on: push: tags`, which a `GITHUB_TOKEN` one does not. No change to the caller `permissions:` above.
 
 ### [Cleanup-GHCR](.github/workflows/ghcr-cleanup.yml)
-Prunes a GHCR package on a schedule: dangling untagged versions, `sha-*` build tags beyond the newest N, old `audit-<run>-<attempt>` candidate tags (left behind by `docker-publish`'s `audit-command` flow; a promoted image only loses the tag, a superseded or failed-audit image goes with it), and signature / referrer tags whose image is gone.
+Prunes a GHCR package on a schedule: dangling untagged versions, `sha-*` build tags beyond the newest N, old `audit-<run>-<attempt>` candidate tags (left behind by `docker-publish`'s `audit-command` flow; a promoted image only loses the tag, a superseded or failed-audit image goes with it).
 - **Caller permissions (required):** `packages: write`.
 - **Inputs:** `package-name` (required), `package-type`, `dry-run` (default `false`: log what would be deleted), `keep-n-sha-tagged` (default `10`), `audit-retention` (default `7 days`), `min-versions-to-keep` (accepted, ignored).
 
