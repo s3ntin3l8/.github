@@ -241,6 +241,9 @@ jobs:
             [ -z "$line" ] && continue
             case "$line" in '#'*) continue ;; esac
             key="${line%%=*}"
+            if [ "$key" = "COMMIT_SHA" ]; then
+              echo "::warning::build arg COMMIT_SHA is supplied by this workflow (the commit it checked out); the caller's value is ignored. Drop it from build-args."
+            fi
             ref="\\$\\{?${key}([^A-Za-z0-9_]|\$)"
             decl="(^|[[:space:]])${key}(=|[[:space:]]|\$)"
             in_final_ref=false; in_final_decl=false; anywhere=false
@@ -314,6 +317,12 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ inputs.image-name }}
+          # metadata-action derives `revision` from github.sha, the commit that triggered
+          # the CALLER, not the one checked out above (a manual dispatch or a rebuild of
+          # an older tag differs). Label the commit that was actually built, same as the
+          # COMMIT_SHA build arg.
+          labels: |
+            org.opencontainers.image.revision=${{ steps.args.outputs.sha }}
 
       - name: Build and push by digest
         id: build
