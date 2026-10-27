@@ -396,6 +396,11 @@ jobs:
 
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          # Installer v4 defaults to cosign v3, which stores image signatures as
+          # an OCI referrer bundle instead of a `.sig` tag. Stay on v2 until that
+          # move is made on purpose (#153).
+          cosign-release: 'v2.6.1'
 
       # See the build job's identically-named step for why this isn't
       # docker/login-action -- same rationale applies here.
