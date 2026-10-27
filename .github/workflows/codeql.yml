@@ -74,9 +74,11 @@ jobs:
       with:
         languages: ${{ matrix.language }}
         queries: ${{ inputs.queries }}
-
-    - name: Autobuild
-      uses: github/codeql-action/autobuild@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        # Interpreted languages need no build; compiled ones (go, java-kotlin, c-cpp,
+        # csharp, swift) and anything not listed here keep the autobuild they always
+        # had. Replaces the standalone `codeql-action/autobuild` step, which upstream
+        # no longer recommends since v4.
+        build-mode: ${{ contains(fromJSON('["javascript-typescript","javascript","typescript","python","ruby","actions","rust"]'), matrix.language) && 'none' || 'autobuild' }}
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
