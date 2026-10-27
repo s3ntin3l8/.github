@@ -22,6 +22,21 @@ here is live in every consumer's *next* CI run — there is no staging.** Theref
   open a PR, confirm its checks pass, then revert. Local YAML parsing and shell-snippet
   checks are necessary but **not** sufficient.
 
+### Pinning policy
+
+- **Consumers track `@main`.** Don't pin a consumer to a SHA or a tag: everything here has one
+  owner, so a pin adds no trust boundary, only a bump PR per fix. The safety net is this repo's
+  required checks (actionlint, zizmor, `hermes-harness`) plus a consumer canary for whatever
+  the harness can't run.
+- **SHA-pinned exceptions.** `.github/workflows/hermes.yml` (self-review, below) is bumped after
+  every `hermes-review.yml` change. `runway-ai-usage-tracker` pins both Hermes callers because
+  its `check_workflow_pins` gate requires SHAs: bump the callers, `scripts/action_pins.json`
+  and the hash in `.secrets.baseline` together.
+- **Third-party actions in this repo** stay pinned to a full SHA with a `# vX.Y.Z` comment, and
+  Dependabot bumps them (weekly, 7-day cooldown, grouped). A merge is live everywhere, so
+  check each major bump against how we use it first, and watch for a tool's own major
+  hiding behind an action bump (cosign-installer v4 installs cosign v3, #153).
+
 ## ⚠️ The caller-permissions contract (the #1 failure mode)
 
 A called workflow's `GITHUB_TOKEN` permissions are **capped by the caller**, and most
@@ -119,7 +134,8 @@ comment only works once the caller is on `main`.
   `HOME`/XDG root exposed as `TEST_ISOLATION_ROOT`; `test-parallel` (xdist) and
   `ci-node`'s `test-pool` (Vitest) are opt-in speedups. All documented in README.md.
 - **Action versions** are bumped by Dependabot (`.github/dependabot.yml`, the
-  `github-actions` ecosystem) — don't hand-pin unless fixing a specific break.
+  `github-actions` ecosystem) — don't hand-pin unless fixing a specific break. See
+  [Pinning policy](#pinning-policy).
 
 ## Quick reference: minimal consumer
 
