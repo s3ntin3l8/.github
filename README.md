@@ -167,6 +167,8 @@ centralized-prompt, reusable design. See [`s3ntin3l8/.github` #18](https://githu
 > `mention-trigger` input (defaults to `hermes`; set it to your App slug, e.g.
 > `s3ntin3l8-hermes`). The bot is guarded against re-triggering itself.
 
+> **Pinning:** callers track `@main` (see "Pinning policy" in [CLAUDE.md](CLAUDE.md)); the only SHA-pinned callers are this repo's own `hermes.yml` and runway's.
+
 ### Full caller example (on-demand, "@<slug>" mention on PRs or issues)
 ```yaml
 |name: Hermes (on-demand)
