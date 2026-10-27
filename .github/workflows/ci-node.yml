@@ -800,7 +800,7 @@ jobs:
         # running (shown as "skipped") when a shard fails — a skipped required check
         # can read as passing in some branch-protection configurations. Fail loudly
         # and explicitly instead. Last, so the uploads above still happen.
-        if: ${{ always() && needs.test-shard.result != 'success' }}
+        if: ${{ !cancelled() && needs.test-shard.result != 'success' }}
         run: |
           echo "::error::One or more test shards failed (needs.test-shard.result=${{ needs.test-shard.result }})."
           exit 1
