@@ -142,6 +142,12 @@ comment only works once the caller is on `main`.
   can host two jobs) and must not fail open. `ci-python` runs pytest with a throwaway
   `HOME`/XDG root exposed as `TEST_ISOLATION_ROOT`; `test-parallel` (xdist) and
   `ci-node`'s `test-pool` (Vitest) are opt-in speedups. All documented in README.md.
+- **Stamping the built commit into an image.** `docker-publish` passes `COMMIT_SHA=<the commit it
+  checked out>` to every build (the tag's commit for a release) and sets the image's
+  `org.opencontainers.image.revision` label to it. A Dockerfile that wants the commit declares
+  `ARG COMMIT_SHA` in the stage that consumes it and maps it to the app's own name
+  (`ENV APP_GIT_SHA=$COMMIT_SHA`). Callers never pass `${{ github.sha }}` as a build arg: it is the
+  commit that triggered the *caller*, which differs on a manual dispatch or a rebuild of an older tag.
 - **Action versions** are bumped by Dependabot (`.github/dependabot.yml`, the
   `github-actions` ecosystem) — don't hand-pin unless fixing a specific break. See
   [Pinning policy](#pinning-policy).

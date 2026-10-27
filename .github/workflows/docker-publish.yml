@@ -314,6 +314,12 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ inputs.image-name }}
+          # metadata-action derives `revision` from github.sha, the commit that triggered
+          # the CALLER, not the one checked out above (a manual dispatch or a rebuild of
+          # an older tag differs). Label the commit that was actually built, same as the
+          # COMMIT_SHA build arg.
+          labels: |
+            org.opencontainers.image.revision=${{ steps.args.outputs.sha }}
 
       - name: Build and push by digest
         id: build
