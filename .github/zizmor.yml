@@ -6,5 +6,9 @@ rules:
         # The ref IS the input: `@stable` selects the toolchain channel and
         # `@cargo-llvm-cov` / `@cargo-audit` select which tool to install.
         # Pinning these to a SHA would change what they do.
+        # Our own reusable workflows and composite actions: everything in the repo
+        # has one owner and is gated by its required checks, so consumers and this
+        # repo's own workflows track `@main` (CLAUDE.md, "Pinning policy").
+        s3ntin3l8/*: ref-pin
         dtolnay/rust-toolchain: ref-pin
         taiki-e/install-action: ref-pin

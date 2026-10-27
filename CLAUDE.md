@@ -33,6 +33,9 @@ here is live in every consumer's *next* CI run — there is no staging.** Theref
   every `hermes-review.yml` change. `runway-ai-usage-tracker` pins **all** its callers to
   SHAs because its `check_workflow_pins` gate requires them: bump the callers,
   `scripts/action_pins.json` and the hash in `.secrets.baseline` together.
+- **Composite actions follow the same rule.** `s3ntin3l8/.github/.github/actions/*` (for example
+  `dockerhub-login`) is referenced on `@main`, from consumers and from this repo's own reusable
+  workflows alike. zizmor's `.github/zizmor.yml` allows a ref pin for the `s3ntin3l8/*` owner.
 - **Third-party actions in this repo** stay pinned to a full SHA with a `# vX.Y.Z` comment, and
   Dependabot bumps them (weekly, 7-day cooldown, grouped). A merge is live everywhere, so
   check each major bump against how we use it first, and watch for a tool's own major
