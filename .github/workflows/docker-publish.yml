@@ -78,7 +78,9 @@ on:
       # tag's commit for a release build), so do NOT pass `${{ github.sha }}` for a build
       # stamp: that is the commit that triggered the caller, which differs from the built
       # ref on a dispatch or a rebuild of an older tag. Declare `ARG COMMIT_SHA` where you
-      # consume it. A caller arg must be consumed somewhere that reaches the shipped image:
+      # consume it. `COMMIT_DATE=<that commit's committer date, ISO 8601>` is added the same
+      # way, for a build-date stamp (`github.event.head_commit.timestamp` is the trigger's
+      # and is null on a dispatch). A caller arg must be consumed somewhere that reaches the shipped image:
       # the build FAILS if the final stage references `$X` without its own `ARG X` (the
       # value would silently be empty), and warns if `X` appears nowhere in the Dockerfile.
       # An arg consumed only in a builder stage (baked into a bundle) is fine.
@@ -222,6 +224,7 @@ jobs:
             exit 1
           fi
           sha=$(git rev-parse HEAD)
+          commit_date=$(git show -s --format=%cI HEAD)
 
           # Logical Dockerfile lines: comments dropped, `\` continuations joined.
           logical=$(awk '
@@ -241,9 +244,11 @@ jobs:
             [ -z "$line" ] && continue
             case "$line" in '#'*) continue ;; esac
             key="${line%%=*}"
-            if [ "$key" = "COMMIT_SHA" ]; then
-              echo "::warning::build arg COMMIT_SHA is supplied by this workflow (the commit it checked out); the caller's value is ignored. Drop it from build-args."
-            fi
+            case "$key" in
+              COMMIT_SHA|COMMIT_DATE)
+                echo "::warning::build arg ${key} is supplied by this workflow (from the commit it checked out); the caller's value is ignored. Drop it from build-args."
+                ;;
+            esac
             ref="\\$\\{?${key}([^A-Za-z0-9_]|\$)"
             decl="(^|[[:space:]])${key}(=|[[:space:]]|\$)"
             in_final_ref=false; in_final_decl=false; anywhere=false
@@ -264,9 +269,11 @@ jobs:
           delim="EOF_$(openssl rand -hex 8)"
           {
             echo "sha=${sha}"
+            echo "date=${commit_date}"
             echo "build_args<<${delim}"
             [ -n "$CALLER_ARGS" ] && printf '%s\n' "$CALLER_ARGS"
             echo "COMMIT_SHA=${sha}"
+            echo "COMMIT_DATE=${commit_date}"
             echo "${delim}"
           } >> "$GITHUB_OUTPUT"
 

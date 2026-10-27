@@ -144,7 +144,7 @@ comment only works once the caller is on `main`.
   `ci-node`'s `test-pool` (Vitest) are opt-in speedups. All documented in README.md.
 - **Stamping the built commit into an image.** `docker-publish` passes `COMMIT_SHA=<the commit it
   checked out>` to every build (the tag's commit for a release) and sets the image's
-  `org.opencontainers.image.revision` label to it. A Dockerfile that wants the commit declares
+  `org.opencontainers.image.revision` label to it; `COMMIT_DATE` (that commit's committer date, ISO 8601) is passed the same way for a build-date stamp. A Dockerfile that wants the commit declares
   `ARG COMMIT_SHA` in the stage that consumes it and maps it to the app's own name
   (`ENV APP_GIT_SHA=$COMMIT_SHA`). Callers never pass `${{ github.sha }}` as a build arg: it is the
   commit that triggered the *caller*, which differs on a manual dispatch or a rebuild of an older tag.
