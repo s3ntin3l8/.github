@@ -238,17 +238,24 @@ jobs:
           # The final stage is everything after the last FROM.
           final=$(awk 'tolower($0) ~ /^from[ \t]/ { buf = ""; next } { buf = buf $0 "\n" } END { printf "%s", buf }' <<< "$logical")
 
+          # The args this workflow owns (COMMIT_SHA, COMMIT_DATE) go through the same check
+          # as the caller's, marked `@owned@`: a Dockerfile that references one in its final
+          # stage without its own ARG would otherwise get an empty value with no error.
           failed=0
           while IFS= read -r line; do
             line="${line#"${line%%[![:space:]]*}"}"
             [ -z "$line" ] && continue
             case "$line" in '#'*) continue ;; esac
+            owned=false
+            case "$line" in '@owned@'*) owned=true; line="${line#@owned@}" ;; esac
             key="${line%%=*}"
-            case "$key" in
-              COMMIT_SHA|COMMIT_DATE)
-                echo "::warning::build arg ${key} is supplied by this workflow (from the commit it checked out); the caller's value is ignored. Drop it from build-args."
-                ;;
-            esac
+            if [ "$owned" = false ]; then
+              case "$key" in
+                COMMIT_SHA|COMMIT_DATE)
+                  echo "::warning::build arg ${key} is supplied by this workflow (from the commit it checked out); the caller's value is ignored. Drop it from build-args."
+                  ;;
+              esac
+            fi
             ref="\\$\\{?${key}([^A-Za-z0-9_]|\$)"
             decl="(^|[[:space:]])${key}(=|[[:space:]]|\$)"
             in_final_ref=false; in_final_decl=false; anywhere=false
@@ -260,10 +267,10 @@ jobs:
             if [ "$in_final_ref" = true ] && [ "$in_final_decl" = false ]; then
               echo "::error file=${DOCKERFILE}::build arg ${key} is referenced in the final stage of ${DOCKERFILE} but not declared there (add 'ARG ${key}' after the last FROM) - the substitution is empty and the image silently drops it"
               failed=1
-            elif [ "$anywhere" = false ]; then
+            elif [ "$anywhere" = false ] && [ "$owned" = false ]; then
               echo "::warning file=${DOCKERFILE}::build arg ${key} is not referenced anywhere in ${DOCKERFILE} - the value is silently dropped (typo?)"
             fi
-          done <<< "$CALLER_ARGS"
+          done < <(printf '%s\n' "$CALLER_ARGS" "@owned@COMMIT_SHA=${sha}" "@owned@COMMIT_DATE=${commit_date}")
           [ "$failed" -eq 0 ] || exit 1
 
           delim="EOF_$(openssl rand -hex 8)"
@@ -327,9 +334,10 @@ jobs:
           # metadata-action derives `revision` from github.sha, the commit that triggered
           # the CALLER, not the one checked out above (a manual dispatch or a rebuild of
           # an older tag differs). Label the commit that was actually built, same as the
-          # COMMIT_SHA build arg.
+          # COMMIT_SHA build arg. `created` likewise defaults to the build's wall clock.
           labels: |
             org.opencontainers.image.revision=${{ steps.args.outputs.sha }}
+            org.opencontainers.image.created=${{ steps.args.outputs.date }}
 
       - name: Build and push by digest
         id: build
