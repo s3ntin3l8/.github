@@ -64,7 +64,7 @@ jobs:
       github.event.pull_request.draft == false
     permissions:
       contents: read # all gh calls in the callee use the Hermes App token
-    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@97351cccf1669bb063ae7587d8bdb52c38bdc4e1 # pinned 2026-10-27 (#150)
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@ca75ae7fdf75952d9e79defb61670c307ee4a406 # pinned 2026-10-27 (#146)
     with:
       mode: auto # review on trigger, no @mention needed
       mention-trigger: s3ntin3l8-hermes
@@ -88,7 +88,7 @@ jobs:
       contains(fromJSON('["MEMBER", "OWNER", "COLLABORATOR"]'), github.event.comment.author_association)
     permissions:
       contents: read # all gh calls in the callee use the Hermes App token
-    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@97351cccf1669bb063ae7587d8bdb52c38bdc4e1 # pinned 2026-10-27 (#150)
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@ca75ae7fdf75952d9e79defb61670c307ee4a406 # pinned 2026-10-27 (#146)
     with:
       mention-trigger: s3ntin3l8-hermes # mode: on-demand is the reusable workflow's default
       hermes-use-runs: true
