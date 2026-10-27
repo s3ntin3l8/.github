@@ -57,6 +57,18 @@ on:
 
 jobs:
   release-please:
+    # Only ever release from the default branch. A caller with `workflow_dispatch:`
+    # (Mullion's Run button) can be started from any ref, and that ref's copy of the
+    # caller would otherwise run this job with contents/pull-requests: write. A skipped
+    # job leaves `release_created` empty, so the callers' downstream publish jobs
+    # (gated on `release_created == 'true'`) are skipped too.
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    # Serialize per repository: a manual run during a push-triggered one would race
+    # two release-please invocations on the same release PR, tag and label flip.
+    # Queue, never cancel, so a running release is not interrupted.
+    concurrency:
+      group: release-please-${{ github.repository }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: write
