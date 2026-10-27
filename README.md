@@ -50,7 +50,7 @@ Runs `lint` / `typecheck` (opt-in) / `test` npm scripts when present (the defaul
   - **`turbo-cache`** (default `true`) — cache `**/.turbo` under `working-directory` across runs (keyed by commit SHA, OS-scoped restore-key fallback). On by default: safe even for non-Turborepo callers (`actions/cache` no-ops on a missing path) and can't produce a stale/wrong result (Turbo's own hashing is content-based). Set `false` to opt out.
   - **`next-cache`** (default `true`) — cache `**/.next/cache` under `working-directory`, keyed by the lockfile + a hash of the JS/TS sources (restore-key fallbacks to the lockfile, then the OS) so `next build` starts warm. On by default for the same reason as `turbo-cache` (no-op without a `.next/cache`). Set `false` to opt out, e.g. if Turborepo already restores `.next`.
 - **Expects:** a `package-lock.json` (uses `npm ci`). For coverage, a test setup that writes an istanbul `json-summary` report to `coverage/coverage-summary.json` (vitest v8, jest, c8, …).
-- **Test Analytics (optional):** if the test runner emits JUnit XML (vitest `--reporter=junit --outputFile=./test-results/junit.xml`, or jest with jest-junit), it's uploaded to Codecov Test Analytics.
+- **Test Analytics (optional):** if the test runner emits JUnit XML (vitest `--reporter=junit --outputFile=./test-results/junit.xml`, or jest with jest-junit), it's uploaded to Codecov Test Analytics. On the sharded path the results are uploaded even when a shard failed (the coverage merge, threshold and upload are skipped then, and `test-merge` still fails).
 
 ### [CI-Go](.github/workflows/ci-go.yml)
 gofmt, `go vet`, `go build`, tests via `gotestsum` (race + coverage + JUnit), Codecov coverage **and** Test Analytics upload, `govulncheck`.
