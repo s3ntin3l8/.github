@@ -186,10 +186,7 @@ jobs:
     # `mention-trigger` input, so the slug lives in exactly one place.
     if: github.actor != 's3ntin3l8-hermes[bot]'
     permissions:
-      contents: write
-      pull-requests: write
-      issues: write
-      checks: write
+      contents: read   # every gh call in the callee uses the Hermes App token
     uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
     with:
       mention-trigger: s3ntin3l8-hermes   # your GitHub App slug
@@ -212,10 +209,7 @@ jobs:
     # The bot never re-triggers itself (its own review/push won't restart this).
     if: github.actor != 's3ntin3l8-hermes[bot]'
     permissions:
-      contents: write
-      pull-requests: write
-      issues: write
-      checks: write
+      contents: read   # every gh call in the callee uses the Hermes App token
     uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
     with:
       mode: auto                      # <-- skips the mention check, reviews on trigger

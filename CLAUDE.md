@@ -43,6 +43,8 @@ here is live in every consumer's *next* CI run — there is no staging.** Theref
   caller must declare `workflow_dispatch:` (next to `push: branches: [main]`) or GitHub
   rejects the dispatch with a 422. Rename the file only, never its `name:` or job ids, so
   required check names stay the same.
+  runway-ai-usage-tracker keeps its older file names (`cleanup-ghcr.yml`, `claude.yml`, ...),
+  because renaming there means touching its pin gate.
 
 ## ⚠️ The caller-permissions contract (the #1 failure mode)
 
