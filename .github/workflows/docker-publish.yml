@@ -544,13 +544,18 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       # The command string reaches the shell through the environment, never the script
-      # text. The candidate reference is its last argument (and `$IMAGE_REF`).
+      # text. The candidate reference is its last argument (and `$IMAGE_REF`). The inner
+      # shell runs with `-e -o pipefail`, like a `run:` step's own shell, so a multi-line
+      # or piped command (`pytest | tee log`) fails on its first failing command instead of
+      # reporting the last one's status and promoting an unaudited image. The explicit
+      # timeout keeps a hung audit from silently eating the job's shared budget.
       - name: Audit the candidate image
         if: ${{ inputs.audit-command != '' }}
+        timeout-minutes: 10
         env:
           AUDIT_COMMAND: ${{ inputs.audit-command }}
           IMAGE_REF: ${{ steps.candidate.outputs.ref }}
-        run: bash -c "$AUDIT_COMMAND \"\$IMAGE_REF\""
+        run: bash -e -o pipefail -c "$AUDIT_COMMAND \"\$IMAGE_REF\""
 
       - name: Retain audit evidence
         if: ${{ always() && inputs.audit-command != '' }}

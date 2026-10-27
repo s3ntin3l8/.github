@@ -187,6 +187,17 @@ run_flow "${AUDITED[@]}"; rc=$?
 grep -q 'resolves to sha256:bbbb, not the audited digest sha256:aaaa' "$WORK/out.log"; check "the error names both digests" $?
 end_case
 
+echo "h) a multi-line or piped audit-command fails on its first failing command"
+for shape in $'false\ntrue' 'false | true'; do
+  new_case
+  export AUDIT_COMMAND="$shape"
+  run_flow "${AUDITED[@]}"; rc=$?
+  [ $rc -ne 0 ]; ok=$?
+  check "fails for: $(printf '%s' "$shape" | tr '\n' ';')" $ok
+  ! grep -q 'create -t ghcr.io/o/img:1.2.3' "$CALL_LOG"; check "  and no release tag is created" $?
+  end_case
+done
+
 echo
 echo "passed: $PASS, failed: $FAIL"
 [ "$FAIL" -eq 0 ]
