@@ -29,13 +29,22 @@ here is live in every consumer's *next* CI run — there is no staging.** Theref
   required checks (actionlint, zizmor, `hermes-harness`) plus a consumer canary for whatever
   the harness can't run.
 - **SHA-pinned exceptions.** `.github/workflows/hermes.yml` (self-review, below) is bumped after
-  every `hermes-review.yml` change. `runway-ai-usage-tracker` pins both Hermes callers because
-  its `check_workflow_pins` gate requires SHAs: bump the callers, `scripts/action_pins.json`
-  and the hash in `.secrets.baseline` together.
+  every `hermes-review.yml` change. `runway-ai-usage-tracker` pins **all** its callers to
+  SHAs because its `check_workflow_pins` gate requires them: bump the callers,
+  `scripts/action_pins.json` and the hash in `.secrets.baseline` together.
 - **Third-party actions in this repo** stay pinned to a full SHA with a `# vX.Y.Z` comment, and
   Dependabot bumps them (weekly, 7-day cooldown, grouped). A merge is live everywhere, so
   check each major bump against how we use it first, and watch for a tool's own major
   hiding behind an action bump (cosign-installer v4 installs cosign v3, #153).
+- **Caller file names.** A consumer's caller is named after the reusable workflow it calls, in
+  `.github/workflows/`: `release-please.yml`, `ghcr-cleanup.yml`, `claude-code.yml`,
+  `hermes.yml`, `codeql.yml`, `dependency-review.yml`; CI is `ci.yml` or `ci-cd.yml`. Mullion's
+  **Run** button finds the release workflow by the exact name `release-please.yml`, and the
+  caller must declare `workflow_dispatch:` (next to `push: branches: [main]`) or GitHub
+  rejects the dispatch with a 422. Rename the file only, never its `name:` or job ids, so
+  required check names stay the same.
+  runway-ai-usage-tracker keeps its older file names (`cleanup-ghcr.yml`, `claude.yml`, ...),
+  because renaming there means touching its pin gate.
 
 ## ⚠️ The caller-permissions contract (the #1 failure mode)
 
