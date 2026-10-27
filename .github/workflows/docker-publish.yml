@@ -88,6 +88,21 @@ on:
         required: false
         type: string
         default: ''
+      # Optional release gate. When set, the merge job does NOT create the release tags
+      # straight from the built digests. It assembles the manifest under a throwaway
+      # `audit-<run>-<attempt>` tag, runs this command with the candidate's
+      # `<registry>/<image>@sha256:...` reference appended as its last argument (also in
+      # `$IMAGE_REF`), from the checked-out source root, and only if it succeeds signs that
+      # exact digest and promotes it to the release tags (failing unless every tag resolves
+      # to it). A failing command publishes nothing. Anything it writes to `image-audit/`
+      # is kept as the `release-image-audit-<image-slug>` artifact (90 days). Empty (the
+      # default) keeps the plain flow: create the tags, then sign. The command is caller
+      # code from the repository being built, run with the job's `id-token: write` and
+      # `packages: write`: the same trust boundary as the Dockerfile.
+      audit-command:
+        required: false
+        type: string
+        default: ''
     secrets:
       REGISTRY_USERNAME:
         required: false
@@ -477,7 +492,11 @@ jobs:
             type=raw,value=beta,enable=${{ inputs.push-release && inputs.release-channel == 'beta' }}
             type=sha,enable=${{ !inputs.push-release }}
 
+      # Plain flow (no `audit-command`): create the release tags straight from the built
+      # digests, then sign. With `audit-command` the tags are created only after the audit
+      # and the signature, in "Promote exactly the audited image" below.
       - name: Create and push manifest list
+        if: ${{ inputs.audit-command == '' }}
         env:
           IMAGE_SLUG: ${{ needs.prepare.outputs.image-slug }}
           IMAGE_NAME: ${{ inputs.image-name }}
@@ -494,14 +513,120 @@ jobs:
           done
           docker buildx imagetools create "${tag_args[@]}" "${digest_args[@]}"
 
-      - name: Sign the published Docker image
+      # Audited flow: the command runs in the built source, so check it out (the same ref
+      # the build job built).
+      - name: Checkout audited source
+        if: ${{ inputs.audit-command != '' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release-tag || github.ref }}
+          persist-credentials: false
+
+      - name: Assemble the candidate image
+        id: candidate
+        if: ${{ inputs.audit-command != '' }}
+        env:
+          IMAGE_SLUG: ${{ needs.prepare.outputs.image-slug }}
+          IMAGE_NAME: ${{ inputs.image-name }}
+        run: |
+          set -euo pipefail
+          cd "/tmp/digests/${IMAGE_SLUG}"
+          digest_args=()
+          for digest_file in *; do
+            digest_args+=("${REGISTRY}/${IMAGE_NAME}@sha256:${digest_file}")
+          done
+          candidate="${REGISTRY}/${IMAGE_NAME}:audit-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx imagetools create -t "$candidate" "${digest_args[@]}"
+          digest=$(docker buildx imagetools inspect "$candidate" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          {
+            echo "digest=${digest}"
+            echo "ref=${REGISTRY}/${IMAGE_NAME}@${digest}"
+          } >> "$GITHUB_OUTPUT"
+
+      # The command string reaches the shell through the environment, never the script
+      # text. The candidate reference is its last argument (and `$IMAGE_REF`). The inner
+      # shell runs with `-e -o pipefail`, like a `run:` step's own shell, so a multi-line
+      # or piped command (`pytest | tee log`) fails on its first failing command instead of
+      # reporting the last one's status and promoting an unaudited image. The explicit
+      # timeout keeps a hung audit from silently eating the job's shared budget.
+      - name: Audit the candidate image
+        if: ${{ inputs.audit-command != '' }}
+        timeout-minutes: 10
+        env:
+          AUDIT_COMMAND: ${{ inputs.audit-command }}
+          IMAGE_REF: ${{ steps.candidate.outputs.ref }}
+        run: bash -e -o pipefail -c "$AUDIT_COMMAND \"\$IMAGE_REF\""
+
+      - name: Retain audit evidence
+        if: ${{ always() && inputs.audit-command != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-image-audit-${{ needs.prepare.outputs.image-slug }}
+          path: image-audit
+          if-no-files-found: ignore
+          retention-days: 90
+
+      # One signature per digest: a signature belongs to the digest, not to a tag, and
+      # every tag points at this one manifest list. cosign v3 writes one referrer per
+      # invocation, so signing once per tag would leave duplicate signatures. In the
+      # audited flow this signs the audited candidate BEFORE any release tag exists, so
+      # nothing is promoted unsigned.
+      #
+      # A transient fault of GitHub's ambient OIDC token endpoint (cosign reports it as a
+      # JSON decode error, or an HTTP 5xx/429, while "fetching ambient OIDC credentials")
+      # is retried; every other failure (a rejected identity, a missing `id-token: write`,
+      # a digest the registry lacks) is permanent and fails at once. A retry changes WHEN
+      # this fails, never WHETHER it does.
+      - name: Sign the image digest
         env:
           VERSION: ${{ steps.meta.outputs.version }}
           IMAGE_NAME: ${{ inputs.image-name }}
+          CANDIDATE_DIGEST: ${{ steps.candidate.outputs.digest }}
         run: |
-          DIGEST=$(docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${VERSION}" \
-            --format '{{json .Manifest.Digest}}' | tr -d '"')
-          # A signature belongs to the digest, not to a tag, and every tag points at this
-          # one manifest list. cosign v3 writes one referrer per invocation, so signing
-          # once per tag would leave duplicate signatures on the same digest.
-          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+          set -euo pipefail
+          DIGEST="$CANDIDATE_DIGEST"
+          if [ -z "$DIGEST" ]; then
+            DIGEST=$(docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${VERSION}" \
+              --format '{{json .Manifest.Digest}}' | tr -d '"')
+          fi
+          ref="${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+          transient='fetching ambient OIDC credentials: (invalid character|.*(status|code)[^0-9]*(5[0-9]{2}|429))'
+          attempts=4
+          for attempt in $(seq 1 "$attempts"); do
+            if out=$(cosign sign --yes "$ref" 2>&1); then
+              printf '%s\n' "$out"
+              exit 0
+            fi
+            printf '%s\n' "$out" >&2
+            if ! grep -Eq "$transient" <<< "$out"; then
+              echo "::error::cosign sign failed for ${ref} (not a transient OIDC token fault, not retrying)"
+              exit 1
+            fi
+            if [ "$attempt" -lt "$attempts" ]; then
+              echo "::warning::transient OIDC token fault signing ${ref} (attempt ${attempt}/${attempts}); retrying in $((attempt * 10))s"
+              sleep $((attempt * 10))
+            fi
+          done
+          echo "::error::cosign sign failed for ${ref} after ${attempts} attempts"
+          exit 1
+
+      - name: Promote exactly the audited image
+        if: ${{ inputs.audit-command != '' }}
+        env:
+          IMAGE_NAME: ${{ inputs.image-name }}
+          AUDITED_DIGEST: ${{ steps.candidate.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mapfile -t tags < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            tag_args+=("-t" "$tag")
+          done
+          docker buildx imagetools create "${tag_args[@]}" "${REGISTRY}/${IMAGE_NAME}@${AUDITED_DIGEST}"
+          for tag in "${tags[@]}"; do
+            actual=$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}' | tr -d '"')
+            if [ "$actual" != "$AUDITED_DIGEST" ]; then
+              echo "::error::${tag} resolves to ${actual}, not the audited digest ${AUDITED_DIGEST}"
+              exit 1
+            fi
+          done

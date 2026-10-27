@@ -15,7 +15,8 @@ here is live in every consumer's *next* CI run — there is no staging.** Theref
   reusable workflow requires (that breaks callers — see below).
 - **Reusable workflows can't run standalone.** This repo's CI (`lint-workflows.yml`) runs
   actionlint, zizmor and `hermes-harness` (`scripts/test-hermes-review.sh`, which runs
-  `hermes-review.yml`'s own steps against a fake `gh` and a fake Hermes); all three are
+  `hermes-review.yml`'s own steps against a fake `gh` and a fake Hermes; the same job also runs
+  `scripts/test-docker-publish-merge.sh` for `docker-publish.yml`'s merge job); all three are
   required to merge. For any other workflow, and for a final check of Hermes changes, the
   real test is a consumer: point a throwaway branch in a consumer repo (e.g. `runway`)
   at your feature ref — `uses: s3ntin3l8/.github/.github/workflows/<x>.yml@<your-branch>` —

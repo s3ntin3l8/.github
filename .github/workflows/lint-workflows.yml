@@ -73,3 +73,7 @@ jobs:
           # `uses:` pins, so bump this by hand if the harness needs a newer PyYAML.
           "$RUNNER_TEMP/venv/bin/pip" install --quiet pyyaml==6.0.2
           PATH="$RUNNER_TEMP/venv/bin:$PATH" bash scripts/test-hermes-review.sh
+      # docker-publish's merge job: the audit gate, signing order/retry and promotion check.
+      # Same PyYAML venv; it needs no network (docker and cosign are faked).
+      - name: Run the docker-publish merge harness
+        run: PATH="$RUNNER_TEMP/venv/bin:$PATH" bash scripts/test-docker-publish-merge.sh
