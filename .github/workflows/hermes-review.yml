@@ -46,11 +46,13 @@ name: Hermes PR Review (reusable)
 # ansible/playbooks/lxc/github-runner/files/job-started.sh, added in
 # s3ntin3l8/ansible-playbooks#107 and deployed with `make github-runner`) fails any job
 # a pull request from another repository triggered, before a step runs, and no PR can
-# edit it. Settings -> Actions -> General -> "Require approval for all outside
-# collaborators" stays on as a second layer. Fork PRs get no secrets and a read-only
-# token, but the runner itself (filesystem + LAN access to hermes-01) is what is at
-# stake, not the token. This guard is automatic in the reusable so callers cannot forget
-# it; callers don't need to add their own copy.
+# edit it. That hook exists only on runners provisioned by that playbook: a caller that
+# points at a stock self-hosted runner has none, and this `if:` is then its only gate.
+# Settings -> Actions -> General -> "Require approval for all outside collaborators"
+# stays on as a second layer. Fork PRs get no secrets and a read-only token, but the
+# runner itself (filesystem + LAN access to hermes-01) is what is at stake, not the
+# token. This guard is automatic in the reusable so callers cannot forget it; callers
+# don't need to add their own copy.
 # Found by s3ntin3l8-hermes[bot]'s review of s3ntin3l8/pocket-portfolio-tracker#720,
 # which introduced an auto-review job that lacked the guard.
 #
