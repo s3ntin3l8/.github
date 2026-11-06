@@ -154,6 +154,36 @@ jobs:
       paths: "docs/screenshots frontend/public/screenshots"
 ```
 
+### [Visual-Baselines](.github/workflows/visual-baselines.yml)
+`/update-baselines` on a pull request regenerates the repo's committed visual baselines in CI (the pinned visual-kit image, the environment the check renders in) and pushes them to the PR branch as one commit, so contributors need no local Docker. Explicit command only, never on push. PNGs that differ from the committed ones by no more than `max-diff-pixels` are left as they are, so the commit holds only real changes; non-PNG/JSON changes abort the run.
+
+- **Who:** a commenter with write access, on an open PR whose branch is in this repository. A fork PR, a closed PR or a commenter without write access is refused with a reply and no push. The PR head is pinned to the SHA seen at the start and the push is a plain fast-forward on top of it (rejected, not forced, if the branch moved).
+- **Caller permissions (required):** `contents: write`, `pull-requests: write`, `actions: write`. The PR's own `make visual-baseline` runs without any token; the push uses `GITHUB_TOKEN`, whose held `pull_request` runs the workflow approves itself for exactly the pushed commit (same mechanism and guards as Visual-Refresh).
+- **Inputs:** `pr-number` (for a dispatch), `target` (default `visual-baseline`), `paths` (default `visual/baselines`), `max-diff-pixels` (default `20`), `dockerfile` (default `visual/Dockerfile`), `python-version` / `node-version`, `timeout-minutes` (default `45`).
+
+```yaml
+name: Update visual baselines
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number
+        required: true
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+jobs:
+  baselines:
+    if: github.event_name == 'workflow_dispatch' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/update-baselines'))
+    uses: s3ntin3l8/.github/.github/workflows/visual-baselines.yml@main
+    with:
+      pr-number: ${{ inputs.pr }}
+      node-version: "26"
+```
+
 ### [Claude-Code](.github/workflows/claude-code.yml)
 On-demand `@claude` assistant for issues and PRs (review + implement), shared so the gate and prompt cannot drift between repos.
 - **Caller permissions (required):** `contents: read`, `pull-requests: write`, `issues: read`, `id-token: write`, `actions: read`.

@@ -1,0 +1,311 @@
+name: Visual baselines
+
+# `/update-baselines` on a pull request: regenerates the repo's committed visual baselines in CI (the pinned
+# visual-kit image, the environment the check renders in) and pushes them to the PR branch as one commit, so a
+# contributor does not need Docker locally. Always an explicit command, never on push. The caller wires the
+# triggers (`issue_comment` filtered to the command, and `workflow_dispatch` with a PR number).
+#
+# Who may use it: a commenter with write access, on an open pull request whose branch is in this repository.
+# Anything else is refused with a reply and no push. The PR head is pinned to the SHA seen at the start: the
+# push is a plain fast-forward on top of it and is rejected if the branch moved meanwhile.
+#
+# It runs the PR's own `make visual-baseline` (PR code), so that step gets no token, and the checkout keeps no
+# credentials. The push uses GITHUB_TOKEN, whose pull_request runs GitHub then holds at `action_required`; with
+# `actions: write` the same token approves them for exactly the commit it pushed, on that same-repository branch.
+on:
+  workflow_call:
+    inputs:
+      pr-number:
+        description: Pull request number for a manual dispatch (a comment trigger reads it from the event).
+        required: false
+        type: string
+        default: ''
+      target:
+        description: Make target that regenerates the baselines.
+        required: false
+        type: string
+        default: 'visual-baseline'
+      paths:
+        description: Space-separated folders the target writes, relative to the repo root.
+        required: false
+        type: string
+        default: 'visual/baselines'
+      max-diff-pixels:
+        description: A PNG whose re-render differs by at most this many pixels is left as committed (visual-kit compare).
+        required: false
+        type: number
+        default: 20
+      dockerfile:
+        description: Dockerfile whose first FROM line names the visual-kit image used for the comparison.
+        required: false
+        type: string
+        default: 'visual/Dockerfile'
+      python-version:
+        description: Python for the demo (empty = not installed).
+        required: false
+        type: string
+        default: ''
+      node-version:
+        description: Node for the demo's frontend (empty = not installed).
+        required: false
+        type: string
+        default: ''
+      timeout-minutes:
+        required: false
+        type: number
+        default: 45
+
+# One regeneration per PR at a time; a second command waits instead of racing the push.
+concurrency:
+  group: visual-baselines-${{ github.repository }}-${{ inputs.pr-number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  baselines:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: write # push the baselines commit to the PR branch
+      pull-requests: write # reply on the PR
+      actions: write # approve the held pull_request runs of that push
+    env:
+      REPO: ${{ github.repository }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      TARGET: ${{ inputs.target }}
+      IMAGE_PATHS: ${{ inputs.paths }}
+      MAX_DIFF_PIXELS: ${{ inputs.max-diff-pixels }}
+      DOCKERFILE: ${{ inputs.dockerfile }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Check the command, the commenter and the pull request
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR_INPUT: ${{ inputs.pr-number }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_IS_PR: ${{ github.event.issue.pull_request && 'true' || 'false' }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ACTOR: ${{ github.event.comment.user.login || github.actor }}
+        run: |
+          set -euo pipefail
+          n="${PR_INPUT:-$ISSUE_NUMBER}"
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" = issue_comment ]; then
+            # A comment on a plain issue, or one that is not the command: nothing to answer.
+            if [ "$ISSUE_IS_PR" != true ] || [[ "$COMMENT_BODY" != /update-baselines* ]]; then
+              echo "Not the command on a pull request; nothing to do."
+              exit 0
+            fi
+          fi
+          if ! [[ "$n" =~ ^[0-9]+$ ]]; then
+            echo "::error::no pull request number (pass pr-number on a dispatch)."
+            exit 1
+          fi
+          refuse() {
+            echo "::notice::refused: $1"
+            gh pr comment "$n" --repo "$REPO" --body "**/update-baselines** was not run: $1" || true
+            exit 0
+          }
+          perm=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq .permission 2>/dev/null || echo none)
+          case "$perm" in
+            admin|maintain|write) ;;
+            *) refuse "@$ACTOR needs write access to this repository." ;;
+          esac
+          pr=$(gh pr view "$n" --repo "$REPO" --json state,isCrossRepository,headRefName,headRefOid)
+          [ "$(jq -r .state <<< "$pr")" = OPEN ] || refuse "the pull request is not open."
+          [ "$(jq -r .isCrossRepository <<< "$pr")" = false ] || refuse "the pull request comes from a fork; a fork's code is not run with write access."
+          branch=$(jq -r .headRefName <<< "$pr")
+          [ "$branch" != "$DEFAULT_BRANCH" ] || refuse "the pull request's branch is the default branch."
+          {
+            echo "ok=true"
+            echo "number=$n"
+            echo "branch=$branch"
+            echo "sha=$(jq -r .headRefOid <<< "$pr")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the pull request head
+        if: ${{ steps.gate.outputs.ok == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The exact commit the checks above approved, not the branch: it may move while this runs.
+          ref: ${{ steps.gate.outputs.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        if: ${{ steps.gate.outputs.ok == 'true' && inputs.python-version != '' }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Set up Node
+        if: ${{ steps.gate.outputs.ok == 'true' && inputs.node-version != '' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      # The next two steps run the pull request's own code. They get no token.
+      - name: Prepare the demo's dependencies
+        if: ${{ steps.gate.outputs.ok == 'true' }}
+        run: |
+          if [ -f .github/visual-setup.sh ]; then
+            bash .github/visual-setup.sh
+          else
+            echo "No .github/visual-setup.sh: assuming the target needs nothing beyond Docker."
+          fi
+
+      - name: Regenerate the baselines
+        if: ${{ steps.gate.outputs.ok == 'true' }}
+        run: make "$TARGET"
+
+      - name: Keep what really changed
+        id: images
+        if: ${{ steps.gate.outputs.ok == 'true' }}
+        run: |
+          set -euo pipefail
+          existing=()
+          for p in $IMAGE_PATHS; do
+            if [ -e "$p" ] || [ -n "$(git ls-files -- "$p")" ]; then existing+=("$p"); fi
+          done
+          if [ "${#existing[@]}" -eq 0 ]; then
+            echo "::error::none of the 'paths' input exists after 'make $TARGET' ($IMAGE_PATHS): check the input."
+            exit 1
+          fi
+          image=$(awk 'toupper($1) == "FROM" { print $2; exit }' "$DOCKERFILE")
+          if [ -z "$image" ]; then
+            echo "::error::no FROM line in $DOCKERFILE: cannot tell which visual-kit image to compare with."
+            exit 1
+          fi
+          # Wholesale replacement re-renders every PNG, and a re-render is never byte-identical: put back every PNG
+          # that differs by no more than the tolerance, so the commit holds only real changes.
+          git add -N -- "${existing[@]}"
+          git -c core.quotePath=false diff --no-renames --name-status HEAD -- "${existing[@]}" > "$RUNNER_TEMP/names.txt"
+          mkdir -p "$RUNNER_TEMP/cmp"; : > "$RUNNER_TEMP/cmp/dirs.txt"
+          while IFS=$'\t' read -r code file; do
+            case "$file" in
+              *.png|*.json) ;;
+              *) echo "::error::the target changed '$file', which is neither a PNG nor JSON: refusing to commit and auto-approve it."; exit 1 ;;
+            esac
+            if [ "$code" != M ] || [[ "$file" != *.png ]]; then continue; fi
+            dir=$(dirname "$file"); key=$(printf '%s' "$dir" | tr '/' '_')
+            mkdir -p "$RUNNER_TEMP/cmp/$key/old" "$RUNNER_TEMP/cmp/$key/new"
+            git show "HEAD:$file" > "$RUNNER_TEMP/cmp/$key/old/$(basename "$file")"
+            cp "$file" "$RUNNER_TEMP/cmp/$key/new/$(basename "$file")"
+            printf '%s\n' "$dir" >> "$RUNNER_TEMP/cmp/dirs.txt"
+          done < "$RUNNER_TEMP/names.txt"
+          while IFS= read -r dir; do
+            [ -n "$dir" ] || continue
+            key=$(printf '%s' "$dir" | tr '/' '_')
+            docker run --rm --user "$(id -u):$(id -g)" -v "$RUNNER_TEMP/cmp/$key:/w" "$image" compare \
+              --base /w/old --head /w/new --out /w/out --max-diff-pixels "$MAX_DIFF_PIXELS"
+            # Entries that did not change beyond the tolerance are restored to their committed bytes.
+            jq -r '.entries[] | select(.result == "same") | .file' "$RUNNER_TEMP/cmp/$key/out/summary.json" \
+              | while IFS= read -r f; do git checkout -q HEAD -- "$dir/$f"; done
+          done < <(sort -u "$RUNNER_TEMP/cmp/dirs.txt")
+          git add -A -- "${existing[@]}"
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git diff --cached --name-status --no-renames > "$RUNNER_TEMP/changed.txt"
+          # What the push step applies, as data: it never reuses this workspace, which the PR's code just ran in.
+          git diff --cached --binary --no-renames HEAD > "$RUNNER_TEMP/baselines.patch"
+          printf '%s\n' "${existing[@]}" > "$RUNNER_TEMP/paths.txt"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Push to the pull request branch
+        id: push
+        if: ${{ steps.images.outputs.changed == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.gate.outputs.branch }}
+          NUMBER: ${{ steps.gate.outputs.number }}
+          PINNED_SHA: ${{ steps.gate.outputs.sha }}
+          # The PR's code can write $HOME/.gitconfig: a planted core.hooksPath there would apply to the fresh repo too.
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: "1"
+        run: |
+          set -euo pipefail
+          moved() {
+            gh pr comment "$NUMBER" --repo "$REPO" \
+              --body "**/update-baselines** did not push: the branch moved while the baselines rendered. Comment the command again." || true
+            echo "::error::the branch moved; nothing was pushed."
+            exit 1
+          }
+          # A fresh repository, not the checkout the PR's `make` just ran in: a hook or config entry planted there
+          # (pre-push, core.hooksPath, core.fsmonitor, a credential helper) would otherwise run next to the token.
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          work="$RUNNER_TEMP/push"
+          rm -rf "$work"; git init -q "$work"; cd "$work"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # A force-push can make the pinned commit unreachable: that is the same "branch moved" outcome.
+          git fetch -q --depth=1 "$remote" "$PINNED_SHA" || moved
+          git checkout -q --detach FETCH_HEAD
+          # The patch is data from the PR's workspace: apply it only if it touches nothing but the configured
+          # folders' PNG and JSON files.
+          while IFS=$'\t' read -r _ _ file; do
+            case "$file" in *.png|*.json) ;; *) echo "::error::the patch touches '$file': refusing."; exit 1 ;; esac
+            ok=false
+            while IFS= read -r p; do
+              if [ "$file" = "$p" ] || [[ "$file" == "$p"/* ]]; then ok=true; fi
+            done < "$RUNNER_TEMP/paths.txt"
+            if [ "$ok" != true ]; then echo "::error::the patch touches '$file', outside the configured paths: refusing."; exit 1; fi
+          done < <(git apply --numstat "$RUNNER_TEMP/baselines.patch")
+          git apply --index "$RUNNER_TEMP/baselines.patch"
+          git commit -q -m "chore: update visual baselines"
+          # A plain push on top of the pinned SHA: rejected, not forced, if the branch moved in the meantime.
+          git push -q "$remote" "HEAD:refs/heads/$BRANCH" || moved
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Approve the pull_request runs held for the pushed commit
+        id: approve
+        if: ${{ steps.push.outputs.sha != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.push.outputs.sha }}
+          BRANCH: ${{ steps.gate.outputs.branch }}
+        run: |
+          set -euo pipefail
+          approved=0
+          for _ in $(seq 1 24); do
+            ids=$(gh api "repos/$REPO/actions/runs?head_sha=$SHA&event=pull_request&per_page=100" \
+              --jq ".workflow_runs[] | select(.head_sha == \"$SHA\" and .head_branch == \"$BRANCH\" and .head_repository.full_name == \"$REPO\" and .conclusion == \"action_required\") | .id")
+            for id in $ids; do
+              gh api -X POST "repos/$REPO/actions/runs/$id/approve" --silent && approved=$((approved + 1))
+            done
+            # The runs appear a few seconds after the push, not all at once: keep looking until a pass finds none.
+            if [ -n "$ids" ]; then sleep 10; continue; fi
+            if [ "$approved" -gt 0 ]; then break; fi
+            sleep 10
+          done
+          echo "Approved $approved held run(s) for $SHA."
+          echo "approved=$approved" >> "$GITHUB_OUTPUT"
+          if [ "$approved" -eq 0 ]; then
+            echo "::warning::no held pull_request run appeared for $SHA; if checks never start, approve them by hand."
+          fi
+
+      - name: Reply on the pull request
+        if: ${{ steps.gate.outputs.ok == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.push.outputs.sha }}
+          CHANGED: ${{ steps.images.outputs.changed }}
+          APPROVED: ${{ steps.approve.outputs.approved }}
+          NUMBER: ${{ steps.gate.outputs.number }}
+        run: |
+          set -euo pipefail
+          if [ "$CHANGED" != true ]; then
+            body="**/update-baselines**: the baselines already match what this branch renders; nothing to commit. ([run]($RUN_URL))"
+          else
+            # shellcheck disable=SC2016 # the backticks are literal markdown
+            files=$(sed 's/^\(.\)\t\(.*\)$/- `\2` (\1)/' "$RUNNER_TEMP/changed.txt")
+            if [ "${APPROVED:-0}" -gt 0 ]; then
+              note="its checks are running."
+            else
+              note="no held check run appeared for it; if its checks never start, approve them by hand in the Actions tab."
+            fi
+            # shellcheck disable=SC2016 # the backticks are literal markdown
+            body=$(printf '**/update-baselines** pushed `%s` ([run](%s)); %s\n\n%s\n\nReview the changed images in the Files tab.' "${SHA:0:7}" "$RUN_URL" "$note" "$files")
+          fi
+          gh pr comment "$NUMBER" --repo "$REPO" --body "$body"

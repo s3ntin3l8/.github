@@ -74,6 +74,7 @@ When you change what permissions a workflow needs, update the per-workflow
 | `dependency-review` | `contents: read` |
 | `hermes-review` | `contents: read` (all `gh` calls use the Hermes App token) |
 | `visual-refresh` | `contents: write`, `pull-requests: write`, `actions: write` (self-approves its own bot-branch runs) |
+| `visual-baselines` | `contents: write`, `pull-requests: write`, `actions: write` (pushes to a same-repo PR branch for a write-access commenter, self-approves that push) |
 | `visual-check` | `contents: read`, `pull-requests: write` (the optional `health` job: `contents: read`) |
 
 ## Hermes reviews this repo's own PRs
@@ -91,7 +92,7 @@ comment only works once the caller is on `main`.
 - `.github/workflows/*.yml` — reusable workflows (`workflow_call`; `hermes.yml` and
   `repo-settings-audit.yml` are this repo's own callers/jobs, not reusable): `ci-python`,
   `ci-node`, `ci-go`, `ci-tauri`, `docker-publish`, `codeql`, `release-please`,
-  `ghcr-cleanup`, `dependency-review`, `visual-check`, `visual-refresh`.
+  `ghcr-cleanup`, `dependency-review`, `visual-check`, `visual-refresh`, `visual-baselines`.
 - `blueprints/python/` — files to **copy into** a new project (Makefile,
   `pre-commit.yaml`, `pyproject.toml`, README template). These are parallel copies of
   what the **[`python-backend-template`](https://github.com/s3ntin3l8/python-backend-template)**
