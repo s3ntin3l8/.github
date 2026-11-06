@@ -133,6 +133,7 @@ Keeps a repo's committed screenshots (README, PWA manifest) fresh. Runs the repo
 - **Inputs:** `target` (default `screenshots`), `paths` (default `docs/screenshots frontend/public/screenshots`), `max-diff-pixels` (default `20`), `branch` (default `bot/refresh-screenshots`; must start with `bot/`), `title` (default `chore: refresh screenshots`), `dockerfile` (default `visual/Dockerfile`), `python-version` / `node-version`, `timeout-minutes` (default `45`).
 - **Why `actions: write`:** the branch and PR are made with `GITHUB_TOKEN`; GitHub then creates the PR's `pull_request` runs but holds them at `action_required` until a maintainer approves. The workflow approves them itself, only for the commit it just pushed and only on the `bot/` branch, so the required checks run without a click. No App, no secrets. If GitHub ever closes that path the fallback is a GitHub App.
 
+- **Tolerance applies twice:** to decide whether to open a PR at all, and to skip a re-push when the branch already holds the same render. If a repo's scenes differ by more than `max-diff-pixels` between two renders of an unchanged tree, every scheduled run will push a new commit (and restart CI); fix the scene's determinism or raise the input.
 - **Images only:** the workflow refuses (and fails) if the target changes anything under `paths` that is not a PNG, and always checks out the default branch, whatever ref a maintainer dispatched from. `paths` defaults to Mullion's layout; other repos set their own.
 
 ```yaml

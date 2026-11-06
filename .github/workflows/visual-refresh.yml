@@ -131,7 +131,10 @@ jobs:
           set -euo pipefail
           # Only the paths that exist: a repo may have just one of the default folders, and git errors on the other.
           existing=()
-          for p in $IMAGE_PATHS; do [ -e "$p" ] && existing+=("$p"); done
+          for p in $IMAGE_PATHS; do
+            # Kept when it exists or is still tracked, so a folder the target deleted reports its images as removed.
+            if [ -e "$p" ] || [ -n "$(git ls-files -- "$p")" ]; then existing+=("$p"); fi
+          done
           if [ "${#existing[@]}" -eq 0 ]; then
             echo "::error::none of the 'paths' input exists after 'make $TARGET' ($IMAGE_PATHS): check the input."
             exit 1
@@ -157,6 +160,8 @@ jobs:
             local from=$1 to=$2 rows=${3:-/dev/null} code file dir key n
             BEYOND=0
             rm -rf "$RUNNER_TEMP/cmp"; mkdir -p "$RUNNER_TEMP/cmp"; : > "$RUNNER_TEMP/cmp/dirs.txt"
+            # Written to a file first so a failing git diff fails the step instead of looking like "nothing changed".
+            xargs -d '\n' git -c core.quotePath=false diff --no-renames --name-status "$from" "$to" -- < "$RUNNER_TEMP/paths.txt" > "$RUNNER_TEMP/names.txt"
             while IFS=$'\t' read -r code file; do
               # The self-approval is justified by "only images": enforce it, do not assume it.
               case "$file" in
@@ -173,7 +178,7 @@ jobs:
               git show "$to:$file" > "$RUNNER_TEMP/cmp/$key/new/$(basename "$file")"
               printf '%s\n' "$dir" >> "$RUNNER_TEMP/cmp/dirs.txt"
             # shellcheck disable=SC2086
-            done < <(xargs -d '\n' git diff --no-renames --name-status "$from" "$to" -- < "$RUNNER_TEMP/paths.txt")
+            done < "$RUNNER_TEMP/names.txt"
             while IFS= read -r dir; do
               [ -n "$dir" ] || continue
               key=$(printf '%s' "$dir" | tr '/' '_')
