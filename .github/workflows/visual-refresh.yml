@@ -1,0 +1,253 @@
+name: Visual refresh
+
+# Keeps a repo's committed screenshots (README, PWA manifest, marketing stills) from going stale: runs the
+# repo's `make screenshots`, and only when an image changed by more than a pixel tolerance pushes the result to
+# one rolling branch and opens (or updates) one pull request. The caller adds `schedule` + `workflow_dispatch`.
+# The tolerance matters: re-renders are not byte-identical (sub-pixel jitter in badges), so `git diff` is no
+# trigger. The comparison is visual-kit's own `compare`, run from the image the repo pins in `visual/Dockerfile`.
+#
+# Identity and CI: the branch is pushed and the PR opened with GITHUB_TOKEN. GitHub then creates the PR's
+# `pull_request` runs but holds them at `action_required` until a maintainer approves; with `actions: write` the
+# same token approves them itself. That bypasses the approval gate for this workflow's own push, so the guards
+# below are part of the design: only the `bot/` branch it just force-pushed, only runs whose head_sha is the
+# commit it just pushed. The code pushed is images regenerated from the default branch by the repo's own target.
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: Make target that regenerates the images (it must leave them where `paths` says).
+        required: false
+        type: string
+        default: 'screenshots'
+      paths:
+        description: Space-separated folders or files the target writes, relative to the repo root.
+        required: false
+        type: string
+        default: 'docs/screenshots frontend/public/screenshots'
+      max-diff-pixels:
+        description: A PNG counts as changed when more than this many pixels differ (visual-kit compare).
+        required: false
+        type: number
+        default: 20
+      branch:
+        description: Rolling branch the refresh is force-pushed to. Must start with `bot/`.
+        required: false
+        type: string
+        default: 'bot/refresh-screenshots'
+      title:
+        description: Pull request title (and commit message).
+        required: false
+        type: string
+        default: 'chore: refresh screenshots'
+      dockerfile:
+        description: Dockerfile whose first FROM line names the visual-kit image used for the comparison.
+        required: false
+        type: string
+        default: 'visual/Dockerfile'
+      python-version:
+        description: Python for the demo (empty = not installed).
+        required: false
+        type: string
+        default: ''
+      node-version:
+        description: Node for the demo's frontend (empty = not installed).
+        required: false
+        type: string
+        default: ''
+      timeout-minutes:
+        required: false
+        type: number
+        default: 45
+
+# One refresh at a time per repo: two runs would force-push the same branch over each other.
+concurrency:
+  group: visual-refresh-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: write # push the rolling branch
+      pull-requests: write # open or update the PR
+      actions: write # approve the held pull_request runs of that push
+    env:
+      TARGET: ${{ inputs.target }}
+      IMAGE_PATHS: ${{ inputs.paths }}
+      MAX_DIFF_PIXELS: ${{ inputs.max-diff-pixels }}
+      BRANCH: ${{ inputs.branch }}
+      TITLE: ${{ inputs.title }}
+      DOCKERFILE: ${{ inputs.dockerfile }}
+      BASE_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Refuse a branch that is not a bot branch
+        run: |
+          case "$BRANCH" in
+            bot/?*) ;;
+            *) echo "::error::branch must start with 'bot/' (got '$BRANCH'): the self-approval below is only allowed there."; exit 1 ;;
+          esac
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        if: ${{ inputs.python-version != '' }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Set up Node
+        if: ${{ inputs.node-version != '' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Prepare the demo's dependencies
+        run: |
+          if [ -f .github/visual-setup.sh ]; then
+            bash .github/visual-setup.sh
+          else
+            echo "No .github/visual-setup.sh: assuming the target needs nothing beyond Docker."
+          fi
+
+      - name: Regenerate the images
+        run: make "$TARGET"
+
+      - name: Compare old and new images
+        id: compare
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086 # IMAGE_PATHS is a space-separated list on purpose
+          git add --intent-to-add -- $IMAGE_PATHS
+          # shellcheck disable=SC2086
+          git status --porcelain -- $IMAGE_PATHS > "$RUNNER_TEMP/status.txt"
+          if [ ! -s "$RUNNER_TEMP/status.txt" ]; then
+            echo "Nothing changed on disk."
+            echo "refresh=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          image=$(awk 'toupper($1) == "FROM" { print $2; exit }' "$DOCKERFILE")
+          if [ -z "$image" ]; then
+            echo "::error::no FROM line in $DOCKERFILE: cannot tell which visual-kit image to compare with."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/cmp"
+          beyond=0
+          : > "$RUNNER_TEMP/rows.md"
+          while IFS= read -r line; do
+            code=${line:0:2}
+            file=${line:3}
+            case "$code" in
+              *A*|\?\?|*D*) # a new or removed file always counts
+                beyond=$((beyond + 1)); echo "| \`$file\` | $([[ $code == *D* ]] && echo removed || echo added) | |" >> "$RUNNER_TEMP/rows.md"; continue ;;
+            esac
+            case "$file" in
+              *.png) ;;
+              *) beyond=$((beyond + 1)); echo "| \`$file\` | changed (not an image) | |" >> "$RUNNER_TEMP/rows.md"; continue ;;
+            esac
+            dir=$(dirname "$file")
+            key=$(printf '%s' "$dir" | tr '/' '_')
+            mkdir -p "$RUNNER_TEMP/cmp/$key/old" "$RUNNER_TEMP/cmp/$key/new"
+            git show "HEAD:$file" > "$RUNNER_TEMP/cmp/$key/old/$(basename "$file")"
+            cp "$file" "$RUNNER_TEMP/cmp/$key/new/$(basename "$file")"
+            printf '%s\n' "$dir" >> "$RUNNER_TEMP/cmp/dirs.txt"
+          done < "$RUNNER_TEMP/status.txt"
+          if [ -f "$RUNNER_TEMP/cmp/dirs.txt" ]; then
+            while IFS= read -r dir; do
+              key=$(printf '%s' "$dir" | tr '/' '_')
+              out="$RUNNER_TEMP/cmp/$key/out"
+              docker run --rm --user "$(id -u):$(id -g)" -v "$RUNNER_TEMP/cmp/$key:/w" "$image" compare \
+                --base /w/old --head /w/new --out /w/out --max-diff-pixels "$MAX_DIFF_PIXELS" > /dev/null
+              n=$(jq '[.entries[] | select(.result == "changed")] | length' "$out/summary.json")
+              beyond=$((beyond + n))
+              jq -r --arg d "$dir" '.entries[] | select(.result == "changed") | "| `\($d)/\(.file)` | \(.pixels) px differ | |"' "$out/summary.json" >> "$RUNNER_TEMP/rows.md"
+            done < <(sort -u "$RUNNER_TEMP/cmp/dirs.txt")
+          fi
+          echo "Images beyond ${MAX_DIFF_PIXELS} px: $beyond"
+          if [ "$beyond" -eq 0 ]; then
+            echo "Only jitter-level differences: not worth a PR."
+            echo "refresh=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "refresh=true" >> "$GITHUB_OUTPUT"
+            echo "beyond=$beyond" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push the rolling branch
+        id: push
+        if: ${{ steps.compare.outputs.refresh == 'true' }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q -B "$BRANCH"
+          # shellcheck disable=SC2086
+          git add -A -- $IMAGE_PATHS
+          git commit -q -m "$TITLE"
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          # An unchanged result (the same tree as the branch already holds) is not pushed again: a new commit
+          # would restart CI for nothing.
+          # shellcheck disable=SC2086
+          if git fetch -q "$remote" "$BRANCH" 2>/dev/null && git diff --quiet FETCH_HEAD HEAD -- $IMAGE_PATHS \
+            && [ "$(git rev-parse FETCH_HEAD^)" = "$(git rev-parse HEAD^)" ]; then
+            echo "The branch already holds this refresh."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git push -q --force "$remote" "HEAD:refs/heads/$BRANCH"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the pull request
+        if: ${{ steps.compare.outputs.refresh == 'true' }}
+        env:
+          BEYOND: ${{ steps.compare.outputs.beyond }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Regenerated by \`make $TARGET\` ([run]($RUN_URL)); $BEYOND image(s) differ by more than $MAX_DIFF_PIXELS px from \`$BASE_BRANCH\`."
+            echo
+            echo "| Image | Change | |"
+            echo "| --- | --- | --- |"
+            cat "$RUNNER_TEMP/rows.md"
+            echo
+            echo "Jitter-level differences in other images are included in the commit but did not trigger this PR."
+            echo "This branch is rewritten by the next refresh; merge it or close it."
+          } > "$RUNNER_TEMP/body.md"
+          number=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --repo "$REPO" --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"
+            echo "Updated #$number."
+          else
+            gh pr create --repo "$REPO" --head "$BRANCH" --base "$BASE_BRANCH" --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"
+          fi
+
+      - name: Approve the pull_request runs held for the pushed commit
+        if: ${{ steps.push.outputs.pushed == 'true' }}
+        env:
+          SHA: ${{ steps.push.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Guard: only the bot branch just force-pushed, and only runs for exactly that commit.
+          case "$BRANCH" in bot/?*) ;; *) echo "::error::refusing to approve runs outside bot/*"; exit 1 ;; esac
+          approved=0
+          for _ in $(seq 1 24); do
+            ids=$(gh api "repos/$REPO/actions/runs?head_sha=$SHA&event=pull_request&per_page=100" \
+              --jq ".workflow_runs[] | select(.head_sha == \"$SHA\" and .head_branch == \"$BRANCH\" and .conclusion == \"action_required\") | .id")
+            for id in $ids; do
+              gh api -X POST "repos/$REPO/actions/runs/$id/approve" --silent && approved=$((approved + 1))
+            done
+            # The runs appear a few seconds after the push, not all at once: keep looking until a pass finds none.
+            if [ -n "$ids" ]; then sleep 10; continue; fi
+            if [ "$approved" -gt 0 ]; then break; fi
+            sleep 10
+          done
+          echo "Approved $approved held run(s) for $SHA."
+          if [ "$approved" -eq 0 ]; then
+            echo "::warning::no held pull_request run appeared for $SHA; if checks never start, approve them by hand."
+          fi

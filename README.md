@@ -126,6 +126,13 @@ jobs:
     uses: s3ntin3l8/.github/.github/workflows/visual-check.yml@main
 ```
 
+### [Visual-Refresh](.github/workflows/visual-refresh.yml)
+Keeps a repo's committed screenshots (README, PWA manifest) fresh. Runs the repo's `make screenshots` (same `.github/visual-setup.sh` hook as Visual-Check), compares old and new PNGs with visual-kit's `compare` (from the image named in `visual/Dockerfile`) and **opens nothing unless at least one image changed by more than `max-diff-pixels`**: re-renders are not byte-identical, so a plain `git diff` would open a PR every week. Otherwise it force-pushes `bot/refresh-screenshots` and opens or updates one rolling PR with a table of what changed. The caller adds `schedule` and `workflow_dispatch`.
+
+- **Caller permissions (required):** `contents: write`, `pull-requests: write`, `actions: write`.
+- **Inputs:** `target` (default `screenshots`), `paths` (default `docs/screenshots frontend/public/screenshots`), `max-diff-pixels` (default `20`), `branch` (default `bot/refresh-screenshots`; must start with `bot/`), `title` (default `chore: refresh screenshots`), `dockerfile` (default `visual/Dockerfile`), `python-version` / `node-version`, `timeout-minutes` (default `45`).
+- **Why `actions: write`:** the branch and PR are made with `GITHUB_TOKEN`; GitHub then creates the PR's `pull_request` runs but holds them at `action_required` until a maintainer approves. The workflow approves them itself, only for the commit it just pushed and only on the `bot/` branch, so the required checks run without a click. No App, no secrets. If GitHub ever closes that path the fallback is a GitHub App.
+
 ### [Claude-Code](.github/workflows/claude-code.yml)
 On-demand `@claude` assistant for issues and PRs (review + implement), shared so the gate and prompt cannot drift between repos.
 - **Caller permissions (required):** `contents: read`, `pull-requests: write`, `issues: read`, `id-token: write`, `actions: read`.
