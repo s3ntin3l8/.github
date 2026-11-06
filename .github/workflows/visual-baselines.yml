@@ -186,7 +186,7 @@ jobs:
               *.png|*.json) ;;
               *) echo "::error::the target changed '$file', which is neither a PNG nor JSON: refusing to commit and auto-approve it."; exit 1 ;;
             esac
-            [ "$code" = M ] && [[ "$file" == *.png ]] || continue
+            if [ "$code" != M ] || [[ "$file" != *.png ]]; then continue; fi
             dir=$(dirname "$file"); key=$(printf '%s' "$dir" | tr '/' '_')
             mkdir -p "$RUNNER_TEMP/cmp/$key/old" "$RUNNER_TEMP/cmp/$key/new"
             git show "HEAD:$file" > "$RUNNER_TEMP/cmp/$key/old/$(basename "$file")"
@@ -197,7 +197,7 @@ jobs:
             [ -n "$dir" ] || continue
             key=$(printf '%s' "$dir" | tr '/' '_')
             docker run --rm --user "$(id -u):$(id -g)" -v "$RUNNER_TEMP/cmp/$key:/w" "$image" compare \
-              --base /w/old --head /w/new --out /w/out --max-diff-pixels "$MAX_DIFF_PIXELS" > /dev/null
+              --base /w/old --head /w/new --out /w/out --max-diff-pixels "$MAX_DIFF_PIXELS"
             # Entries that did not change beyond the tolerance are restored to their committed bytes.
             jq -r '.entries[] | select(.result == "same") | .file' "$RUNNER_TEMP/cmp/$key/out/summary.json" \
               | while IFS= read -r f; do git checkout -q HEAD -- "$dir/$f"; done
@@ -208,6 +208,9 @@ jobs:
             exit 0
           fi
           git diff --cached --name-status --no-renames > "$RUNNER_TEMP/changed.txt"
+          # What the push step applies, as data: it never reuses this workspace, which the PR's code just ran in.
+          git diff --cached --binary --no-renames HEAD > "$RUNNER_TEMP/baselines.patch"
+          printf '%s\n' "${existing[@]}" > "$RUNNER_TEMP/paths.txt"
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Push to the pull request branch
@@ -217,12 +220,30 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ steps.gate.outputs.branch }}
           NUMBER: ${{ steps.gate.outputs.number }}
+          PINNED_SHA: ${{ steps.gate.outputs.sha }}
         run: |
           set -euo pipefail
+          # A fresh repository, not the checkout the PR's `make` just ran in: a hook or config entry planted there
+          # (pre-push, core.hooksPath, core.fsmonitor, a credential helper) would otherwise run next to the token.
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          work="$RUNNER_TEMP/push"
+          rm -rf "$work"; git init -q "$work"; cd "$work"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch -q --depth=1 "$remote" "$PINNED_SHA"
+          git checkout -q --detach FETCH_HEAD
+          # The patch is data from the PR's workspace: apply it only if it touches nothing but the configured
+          # folders' PNG and JSON files.
+          while IFS=$'\t' read -r _ _ file; do
+            case "$file" in *.png|*.json) ;; *) echo "::error::the patch touches '$file': refusing."; exit 1 ;; esac
+            ok=false
+            while IFS= read -r p; do
+              if [ "$file" = "$p" ] || [[ "$file" == "$p"/* ]]; then ok=true; fi
+            done < "$RUNNER_TEMP/paths.txt"
+            if [ "$ok" != true ]; then echo "::error::the patch touches '$file', outside the configured paths: refusing."; exit 1; fi
+          done < <(git apply --numstat "$RUNNER_TEMP/baselines.patch")
+          git apply --index "$RUNNER_TEMP/baselines.patch"
           git commit -q -m "chore: update visual baselines"
-          remote="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
           # A plain push on top of the pinned SHA: rejected, not forced, if the branch moved in the meantime.
           if ! git push -q "$remote" "HEAD:refs/heads/$BRANCH"; then
             gh pr comment "$NUMBER" --repo "$REPO" \
@@ -233,6 +254,7 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Approve the pull_request runs held for the pushed commit
+        id: approve
         if: ${{ steps.push.outputs.sha != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -253,6 +275,7 @@ jobs:
             sleep 10
           done
           echo "Approved $approved held run(s) for $SHA."
+          echo "approved=$approved" >> "$GITHUB_OUTPUT"
           if [ "$approved" -eq 0 ]; then
             echo "::warning::no held pull_request run appeared for $SHA; if checks never start, approve them by hand."
           fi
@@ -263,6 +286,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ steps.push.outputs.sha }}
           CHANGED: ${{ steps.images.outputs.changed }}
+          APPROVED: ${{ steps.approve.outputs.approved }}
           NUMBER: ${{ steps.gate.outputs.number }}
         run: |
           set -euo pipefail
@@ -271,7 +295,12 @@ jobs:
           else
             # shellcheck disable=SC2016 # the backticks are literal markdown
             files=$(sed 's/^\(.\)\t\(.*\)$/- `\2` (\1)/' "$RUNNER_TEMP/changed.txt")
-            # shellcheck disable=SC2016
-            body=$(printf '**/update-baselines** pushed `%s` ([run](%s)); its checks are running.\n\n%s\n\nReview the changed images in the Files tab.' "${SHA:0:7}" "$RUN_URL" "$files")
+            if [ "${APPROVED:-0}" -gt 0 ]; then
+              note="its checks are running."
+            else
+              note="no held check run appeared for it; if its checks never start, approve them by hand in the Actions tab."
+            fi
+            # shellcheck disable=SC2016 # the backticks are literal markdown
+            body=$(printf '**/update-baselines** pushed `%s` ([run](%s)); %s\n\n%s\n\nReview the changed images in the Files tab.' "${SHA:0:7}" "$RUN_URL" "$note" "$files")
           fi
           gh pr comment "$NUMBER" --repo "$REPO" --body "$body"
