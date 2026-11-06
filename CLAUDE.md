@@ -73,7 +73,7 @@ When you change what permissions a workflow needs, update the per-workflow
 | `ghcr-cleanup` | `packages: write` |
 | `dependency-review` | `contents: read` |
 | `hermes-review` | `contents: read` (all `gh` calls use the Hermes App token) |
-| `visual-check` | `contents: read`, `pull-requests: write` |
+| `visual-check` | `contents: read`, `pull-requests: write` (the optional `health` job: `contents: read`) |
 
 ## Hermes reviews this repo's own PRs
 

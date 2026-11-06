@@ -41,6 +41,14 @@ on:
         required: false
         type: boolean
         default: false
+      health-gate:
+        description: >-
+          Also publish a separate `health` job (shown as `<caller job> / health`) that goes red when the PR adds a
+          console error or a serious/critical axe node (visual-kit's `--fail-on-health`). Needs visual-kit 0.3.0 or
+          newer. Pixel results stay advisory, and this workflow never marks the check required.
+        required: false
+        type: boolean
+        default: false
       timeout-minutes:
         required: false
         type: number
@@ -74,6 +82,7 @@ jobs:
       TARGET: ${{ inputs.target }}
       ROUTES: ${{ inputs.routes }}
       REPORT_PATH: ${{ inputs.report-path }}
+      HEALTH_GATE: ${{ inputs.health-gate && '1' || '0' }}
       BASE_REF: ${{ github.base_ref }}
     steps:
       - name: Checkout (full history, because the base is the merge base)
@@ -107,7 +116,16 @@ jobs:
           set -euo pipefail
           args=("BASE=origin/${BASE_REF:-main}")
           if [ -n "$ROUTES" ]; then args+=("ROUTES=$ROUTES"); fi
-          make "$TARGET" "${args[@]}"
+          if [ "$HEALTH_GATE" = 1 ]; then args+=("HEALTH_GATE=1"); fi
+          rc=0
+          make "$TARGET" "${args[@]}" || rc=$?
+          # With the gate on, the target exits non-zero for a health verdict; that is the `health` job's to report
+          # (make folds every failure into exit 2, so the report is what tells a verdict from a broken run).
+          if [ "$rc" -ne 0 ] && [ "$HEALTH_GATE" = 1 ] && jq -e '.health' "$REPORT_PATH/summary.json" >/dev/null 2>&1; then
+            echo "The target exited $rc after writing a report with a health verdict; the health job reports it."
+            rc=0
+          fi
+          exit "$rc"
 
       - name: Upload the report
         if: ${{ !cancelled() }}
@@ -154,3 +172,44 @@ jobs:
           else
             gh api "repos/$REPO/issues/$PR/comments" -f body="$body" --silent
           fi
+
+  # Its own job so it is its own check (`<caller job> / health`), with no extra token permission. It reads the
+  # verdict visual-kit wrote into summary.json; the pixel report above stays advisory. Never in a required list
+  # from here: whether it is required is the consumer's decision.
+  health:
+    needs: visual-check
+    if: ${{ always() && !cancelled() && inputs.health-gate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      REPORT_PATH: ${{ inputs.report-path }}
+    steps:
+      - name: Download the report
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: visual-check-report
+          path: report
+
+      - name: Health verdict
+        run: |
+          set -euo pipefail
+          summary=report/summary.json
+          if [ ! -f "$summary" ]; then
+            echo "::error::No report to gate: the visual check produced no summary.json (see the visual-check job)."
+            exit 1
+          fi
+          if ! jq -e '.health' "$summary" >/dev/null; then
+            echo "::error::summary.json has no health verdict: the repo's visual-kit predates 0.3.0 or the target does not run it."
+            exit 1
+          fi
+          {
+            echo "## Visual health"
+            if jq -e '.health.ok' "$summary" >/dev/null; then
+              echo "No new console errors or serious/critical axe nodes."
+            else
+              jq -r '.health | "\(.entries | length) shot(s) with new findings (\(.console) console, \(.axe) axe):", (.entries[] | "- `\(.file)`", (.findings[] | "    - \(.)"))' "$summary"
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -e '.health.ok' "$summary" >/dev/null
