@@ -25,7 +25,10 @@ on:
         type: string
         default: 'docs/screenshots frontend/public/screenshots'
       max-diff-pixels:
-        description: A PNG counts as changed when more than this many pixels differ (visual-kit compare).
+        description: >-
+          A PNG counts as changed when more than this many pixels differ (visual-kit compare). One number for every
+          image: a scene's own `maxDiffPixels` in scenes.json does not apply, because the README/PWA files are named
+          by the readme profile, not the check profile.
         required: false
         type: number
         default: 20
@@ -94,6 +97,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Always the default branch, whatever ref a maintainer dispatched from: the bot branch is built on top of
+          # this checkout, so a dispatch from a feature branch must not carry its commits into an auto-approved PR.
+          ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
       - name: Set up Python
@@ -123,8 +129,15 @@ jobs:
         id: compare
         run: |
           set -euo pipefail
-          # shellcheck disable=SC2086 # IMAGE_PATHS is a space-separated list on purpose
-          if [ -z "$(git status --porcelain -- $IMAGE_PATHS)" ]; then
+          # Only the paths that exist: a repo may have just one of the default folders, and git errors on the other.
+          existing=()
+          for p in $IMAGE_PATHS; do [ -e "$p" ] && existing+=("$p"); done
+          if [ "${#existing[@]}" -eq 0 ]; then
+            echo "::error::none of the 'paths' input exists after 'make $TARGET' ($IMAGE_PATHS): check the input."
+            exit 1
+          fi
+          printf '%s\n' "${existing[@]}" > "$RUNNER_TEMP/paths.txt"
+          if [ -z "$(git status --porcelain -- "${existing[@]}")" ]; then
             echo "Nothing changed on disk."
             echo "refresh=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -145,13 +158,14 @@ jobs:
             BEYOND=0
             rm -rf "$RUNNER_TEMP/cmp"; mkdir -p "$RUNNER_TEMP/cmp"; : > "$RUNNER_TEMP/cmp/dirs.txt"
             while IFS=$'\t' read -r code file; do
-              case "$code" in
-                A) BEYOND=$((BEYOND + 1)); echo "| \`$file\` | added | |" >> "$rows"; continue ;;
-                D) BEYOND=$((BEYOND + 1)); echo "| \`$file\` | removed | |" >> "$rows"; continue ;;
-              esac
+              # The self-approval is justified by "only images": enforce it, do not assume it.
               case "$file" in
                 *.png) ;;
-                *) BEYOND=$((BEYOND + 1)); echo "| \`$file\` | changed (not an image) | |" >> "$rows"; continue ;;
+                *) echo "::error::the target changed '$file', which is not a PNG: refusing to commit and auto-approve it."; exit 1 ;;
+              esac
+              case "$code" in
+                A) BEYOND=$((BEYOND + 1)); echo "| \`$file\` | added |" >> "$rows"; continue ;;
+                D) BEYOND=$((BEYOND + 1)); echo "| \`$file\` | removed |" >> "$rows"; continue ;;
               esac
               dir=$(dirname "$file"); key=$(printf '%s' "$dir" | tr '/' '_')
               mkdir -p "$RUNNER_TEMP/cmp/$key/old" "$RUNNER_TEMP/cmp/$key/new"
@@ -159,7 +173,7 @@ jobs:
               git show "$to:$file" > "$RUNNER_TEMP/cmp/$key/new/$(basename "$file")"
               printf '%s\n' "$dir" >> "$RUNNER_TEMP/cmp/dirs.txt"
             # shellcheck disable=SC2086
-            done < <(git diff --no-renames --name-status "$from" "$to" -- $IMAGE_PATHS)
+            done < <(xargs -d '\n' git diff --no-renames --name-status "$from" "$to" -- < "$RUNNER_TEMP/paths.txt")
             while IFS= read -r dir; do
               [ -n "$dir" ] || continue
               key=$(printf '%s' "$dir" | tr '/' '_')
@@ -167,7 +181,7 @@ jobs:
                 --base /w/old --head /w/new --out /w/out --max-diff-pixels "$MAX_DIFF_PIXELS" > /dev/null
               n=$(jq '[.entries[] | select(.result == "changed")] | length' "$RUNNER_TEMP/cmp/$key/out/summary.json")
               BEYOND=$((BEYOND + n))
-              jq -r --arg d "$dir" '.entries[] | select(.result == "changed") | "| `\($d)/\(.file)` | \(.pixels) px differ | |"' \
+              jq -r --arg d "$dir" '.entries[] | select(.result == "changed") | "| `\($d)/\(.file)` | \(.pixels) px differ |"' \
                 "$RUNNER_TEMP/cmp/$key/out/summary.json" >> "$rows"
             done < <(sort -u "$RUNNER_TEMP/cmp/dirs.txt")
           }
@@ -177,8 +191,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -q -B "$BRANCH"
-          # shellcheck disable=SC2086
-          git add -A -- $IMAGE_PATHS
+          git add -A -- "${existing[@]}"
           git commit -q -m "$TITLE"
           : > "$RUNNER_TEMP/rows.md"
           beyond HEAD^ HEAD "$RUNNER_TEMP/rows.md"
@@ -222,8 +235,8 @@ jobs:
           {
             echo "Regenerated by \`make $TARGET\` ([run]($RUN_URL)); $BEYOND image(s) differ by more than $MAX_DIFF_PIXELS px from \`$BASE_BRANCH\`."
             echo
-            echo "| Image | Change | |"
-            echo "| --- | --- | --- |"
+            echo "| Image | Change |"
+            echo "| --- | --- |"
             cat "$RUNNER_TEMP/rows.md"
             echo
             echo "Jitter-level differences in other images are included in the commit but did not trigger this PR."
@@ -248,7 +261,7 @@ jobs:
           approved=0
           for _ in $(seq 1 24); do
             ids=$(gh api "repos/$REPO/actions/runs?head_sha=$SHA&event=pull_request&per_page=100" \
-              --jq ".workflow_runs[] | select(.head_sha == \"$SHA\" and .head_branch == \"$BRANCH\" and .conclusion == \"action_required\") | .id")
+              --jq ".workflow_runs[] | select(.head_sha == \"$SHA\" and .head_branch == \"$BRANCH\" and .head_repository.full_name == \"$REPO\" and .conclusion == \"action_required\") | .id")
             for id in $ids; do
               gh api -X POST "repos/$REPO/actions/runs/$id/approve" --silent && approved=$((approved + 1))
             done
