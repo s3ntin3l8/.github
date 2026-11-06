@@ -221,8 +221,17 @@ jobs:
           BRANCH: ${{ steps.gate.outputs.branch }}
           NUMBER: ${{ steps.gate.outputs.number }}
           PINNED_SHA: ${{ steps.gate.outputs.sha }}
+          # The PR's code can write $HOME/.gitconfig: a planted core.hooksPath there would apply to the fresh repo too.
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: "1"
         run: |
           set -euo pipefail
+          moved() {
+            gh pr comment "$NUMBER" --repo "$REPO" \
+              --body "**/update-baselines** did not push: the branch moved while the baselines rendered. Comment the command again." || true
+            echo "::error::the branch moved; nothing was pushed."
+            exit 1
+          }
           # A fresh repository, not the checkout the PR's `make` just ran in: a hook or config entry planted there
           # (pre-push, core.hooksPath, core.fsmonitor, a credential helper) would otherwise run next to the token.
           remote="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
@@ -230,7 +239,8 @@ jobs:
           rm -rf "$work"; git init -q "$work"; cd "$work"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch -q --depth=1 "$remote" "$PINNED_SHA"
+          # A force-push can make the pinned commit unreachable: that is the same "branch moved" outcome.
+          git fetch -q --depth=1 "$remote" "$PINNED_SHA" || moved
           git checkout -q --detach FETCH_HEAD
           # The patch is data from the PR's workspace: apply it only if it touches nothing but the configured
           # folders' PNG and JSON files.
@@ -245,12 +255,7 @@ jobs:
           git apply --index "$RUNNER_TEMP/baselines.patch"
           git commit -q -m "chore: update visual baselines"
           # A plain push on top of the pinned SHA: rejected, not forced, if the branch moved in the meantime.
-          if ! git push -q "$remote" "HEAD:refs/heads/$BRANCH"; then
-            gh pr comment "$NUMBER" --repo "$REPO" \
-              --body "**/update-baselines** did not push: the branch moved while the baselines rendered. Comment the command again." || true
-            echo "::error::the branch moved; nothing was pushed."
-            exit 1
-          fi
+          git push -q "$remote" "HEAD:refs/heads/$BRANCH" || moved
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Approve the pull_request runs held for the pushed commit
