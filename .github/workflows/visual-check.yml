@@ -120,8 +120,10 @@ jobs:
           rc=0
           make "$TARGET" "${args[@]}" || rc=$?
           # With the gate on, the target exits non-zero for a health verdict; that is the `health` job's to report
-          # (make folds every failure into exit 2, so the report is what tells a verdict from a broken run).
-          if [ "$rc" -ne 0 ] && [ "$HEALTH_GATE" = 1 ] && jq -e '.health' "$REPORT_PATH/summary.json" >/dev/null 2>&1; then
+          # (make folds every failure into exit 2, so the report is what tells a verdict from a broken run). Only a
+          # report that says `health.ok == false` counts: every 0.3.0+ report carries `health`, including one from a
+          # run where a scene failed to render (ok stays true there), and that failure must stay red.
+          if [ "$rc" -ne 0 ] && [ "$HEALTH_GATE" = 1 ] && jq -e '.health.ok == false' "$REPORT_PATH/summary.json" >/dev/null 2>&1; then
             echo "The target exited $rc after writing a report with a health verdict; the health job reports it."
             rc=0
           fi
@@ -183,9 +185,9 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-    env:
-      REPORT_PATH: ${{ inputs.report-path }}
     steps:
+      # A run that uploaded nothing fails here, before the script below; its "No report" error only fires when
+      # the artifact exists without a summary.json. Both are fail-closed.
       - name: Download the report
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
