@@ -1064,6 +1064,17 @@ jobs:
             # axis -- a stuck session or a pruned id says nothing about the key -- so it
             # refunds its attempt and is bounded by its own counters instead: a pruned id
             # must not eat the attempts a stuck session needs, nor the other way round.
+            # Hermes rejects an Idempotency-Key over 255 characters (a confusing HTTP 400).
+            # Each rollover and each dead run APPENDS to the key, so a long repo name plus a
+            # long refusal chain could get there. Past a safe length the key is replaced by
+            # a hash of itself: deterministic, so a repeat of the same retry still computes
+            # the same key and replays instead of dispatching again. Short keys are left
+            # alone, which keeps them identical to the ones Mullion's relay builds.
+            bound_idempotency_key() {
+              if (( ${#IDEMPOTENCY_KEY} > 240 )); then
+                IDEMPOTENCY_KEY="hermes-review:sha256:$(printf '%s' "$IDEMPOTENCY_KEY" | sha256sum | cut -d' ' -f1)"
+              fi
+            }
             ATTEMPT=0
             STUCK_REFUSALS=0
             RETIRED_SKIPS=0
@@ -1112,15 +1123,16 @@ jobs:
               # the in-flight ledger is for, and it has already run: it skips when a
               # review of this head is live and stops one that went stale.
               CONFLICT_CODE=$(jq -r '.error.code // "idempotency_key_conflict"' "$RESP" 2>/dev/null || echo idempotency_key_conflict)
-              # Which refusals are about the SESSION rather than the key. A not_found with no
-              # session id (an issue triage sends none) is not one: it stays on the key path.
+              # Which refusals are about the SESSION rather than the key. With no session id (an
+              # issue triage sends none) there is no session to move off, so none of them is
+              # one: they stay on the key path instead of rolling to a bare "-2".
               SESSION_REFUSAL=""
-              case "$CONFLICT_CODE" in
-                admission_conflict) SESSION_REFUSAL="stuck" ;;
-                not_found|session_deleted)
-                  if [[ -n "$SESSION_ID" ]]; then SESSION_REFUSAL="retired"; fi
-                  ;;
-              esac
+              if [[ -n "$SESSION_ID" ]]; then
+                case "$CONFLICT_CODE" in
+                  admission_conflict) SESSION_REFUSAL="stuck" ;;
+                  not_found|session_deleted) SESSION_REFUSAL="retired" ;;
+                esac
+              fi
               MARKER_RUN=""
               EXISTING_STATUS=""
               # The marker for this range is on this head, so the head's own
@@ -1198,6 +1210,7 @@ jobs:
                 SESSION_ATTEMPT=$(( SESSION_ATTEMPT + 1 ))
                 SESSION_ID="${BASE_SESSION_ID}-${SESSION_ATTEMPT}"
                 IDEMPOTENCY_KEY="${IDEMPOTENCY_KEY}#session-${SESSION_ATTEMPT}"
+                bound_idempotency_key
                 FRESH_SESSION=1
                 build_msg
                 RUN_BODY=$(jq -nc --arg model "$API_MODEL" --arg input "$MSG" --arg session "$SESSION_ID" \
@@ -1261,6 +1274,7 @@ jobs:
                   # again.
                   echo "::notice::the attempt Hermes held for this range ended ($EXISTING_STATUS, run $MARKER_RUN) — starting a fresh one under a deeper key."
                   IDEMPOTENCY_KEY="$IDEMPOTENCY_KEY#$MARKER_RUN"
+                  bound_idempotency_key
                   continue
                   ;;
                 *)

@@ -641,6 +641,28 @@ start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,409,409,
   || { check "eight pruned ids give up with a message that names the prune" no; sed 's/^/        /' "$TMP/log.prunedcap" | tail -6; }
 stop_fake
 
+echo "== an issue triage has no session to move off =="
+# No session id: a session refusal has nothing to roll over, so it must not invent "-2".
+start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,409,409],"conflict_code":"admission_conflict","request_log":"'"$TMP"'/requests.log"}'
+: > "$TMP/requests.log"
+( export TARGET_KIND=issue GITHUB_RUN_ID=1 GITHUB_RUN_ATTEMPT=1; set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.nosession" 2>&1; rc=$?
+# it must really have dispatched (a vacuous pass is what a crashed step would give)
+[[ $(grep -c '"method": "POST"' "$TMP/requests.log") -ge 1 ]] && ! grep -q '"session_id": "-' "$TMP/requests.log" \
+  && check "an admission_conflict without a session id does not roll to a bare -2" yes \
+  || { check "an admission_conflict without a session id does not roll to a bare -2" no; sed 's/^/        /' "$TMP/requests.log" | cut -c1-140 | head -4; }
+stop_fake
+
+echo "== a long refusal chain keeps the idempotency key within Hermes' limit =="
+LONG_REPO="widgets$(printf 'x%.0s' $(seq 1 190))"
+start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,409,409,409,409,202],"conflict_code":"not_found","request_log":"'"$TMP"'/requests.log"}'
+: > "$TMP/requests.log"
+( export REPO="acme/$LONG_REPO"; set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.longkey" 2>&1; rc=$?
+MAXKEY=$(grep -o '"idempotency_key": "[^"]*"' "$TMP/requests.log" | sed 's/"idempotency_key": "//; s/"$//' | awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }')
+[[ $rc -eq 0 && $(grep -c '"method": "POST"' "$TMP/requests.log") -eq 6 && $MAXKEY -gt 0 && $MAXKEY -le 255 ]] \
+  && check "every idempotency key of a long refusal chain is at most 255 characters" yes \
+  || { check "every idempotency key of a long refusal chain is at most 255 characters (longest: $MAXKEY, rc=$rc)" no; sed 's/^/        /' "$TMP/log.longkey" | tail -6; }
+stop_fake
+
 echo "== the legacy path says a refusal is a refusal =="
 export USE_RUNS="false"
 start_fake '{"legacy_code":409,"request_log":"'"$TMP"'/requests.log"}'
