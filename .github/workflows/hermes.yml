@@ -21,10 +21,14 @@ name: Hermes (review)
 # runner. For a `pull_request` event, GitHub runs the workflow FILE from the PR's
 # own head ref, so a fork PR can edit or delete the `head.repo.full_name` guard
 # below (or re-point `uses:`). That guard is therefore NOT the trust boundary; it
-# only catches accidents. The real control is the repo setting Settings ->
-# Actions -> General -> "Require approval for all outside collaborators", which
-# must stay on: the runner (filesystem, LAN access) is what is at stake, not the
-# token (fork PRs get no secrets and a read-only token). The on-demand path is
+# only catches accidents. The real control is on the runner host: its job-started
+# hook (ACTIONS_RUNNER_HOOK_JOB_STARTED, s3ntin3l8/ansible-playbooks
+# ansible/playbooks/lxc/github-runner/files/job-started.sh, #107) fails any job a
+# pull request from another repository triggered, before a step runs, and no PR
+# can edit it. The repo setting Settings -> Actions -> General -> "Require
+# approval for all outside collaborators" must stay on as a second layer: the
+# runner (filesystem, LAN access) is what is at stake, not the token (fork PRs
+# get no secrets and a read-only token). The on-demand path is
 # unaffected: `issue_comment` always runs the DEFAULT BRANCH's copy of this file,
 # so the author_association gate there is sufficient on its own.
 # NOTE (this repo hosts the reusable workflow): the `uses:` below is pinned to a
