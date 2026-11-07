@@ -34,7 +34,8 @@ STATE = {
     # answers 409, the second 202. dispatch_code is the fallback.
     "dispatch_codes": [],
     # The error code a 409 carries: "idempotency_key_conflict" (the key holds a
-    # different body) or "admission_conflict" (the session refused the turn).
+    # different body), "admission_conflict" (the session refused the turn) or
+    # "not_found" / "session_deleted" (the session was pruned and its id is fenced).
     "conflict_code": "idempotency_key_conflict",
     # What POST /v1/chat/completions (the legacy path) answers.
     "legacy_code": 200,

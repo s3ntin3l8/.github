@@ -594,6 +594,53 @@ grep -q "NOT dispatched" "$TMP/log.exhausted" \
   || check "an exhausted dispatch loop exits non-zero" no
 stop_fake
 
+echo "== a stuck session still spends exactly three dispatches =="
+start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,409,409,202],"conflict_code":"admission_conflict","request_log":"'"$TMP"'/requests.log"}'
+: > "$TMP/requests.log"
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.stuck3" 2>&1; rc=$?
+[[ $rc -ne 0 && $(grep -c '"method": "POST"' "$TMP/requests.log") -eq 3 ]] \
+  && check "three stuck sessions give up after three dispatches" yes \
+  || { check "three stuck sessions give up after three dispatches" no; sed 's/^/        /' "$TMP/log.stuck3" | tail -6; }
+stop_fake
+
+for PRUNED_CODE in not_found session_deleted; do
+echo "== a pruned session ($PRUNED_CODE) is retried in a fresh one =="
+start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,202],"conflict_code":"'"$PRUNED_CODE"'","request_log":"'"$TMP"'/requests.log"}'
+: > "$TMP/requests.log"
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.pruned" 2>&1; rc=$?
+grep -q '"session_id": "hermes-review-acme-widgets-42-2"' "$TMP/requests.log" \
+  && check "$PRUNED_CODE: the pruned session is retried in a fresh one" yes \
+  || { check "$PRUNED_CODE: the pruned session is retried in a fresh one" no; \
+       sed 's/^/        /' "$TMP/log.pruned" | tail -8; \
+       sed 's/^/        /' "$TMP/requests.log" | cut -c1-140 | head -4; }
+grep -q '"idempotency_key": "hermes-review:acme/widgets#42@..head111#session-2"' "$TMP/requests.log" \
+  && check "$PRUNED_CODE: the fresh session moves the idempotency key with it" yes \
+  || check "$PRUNED_CODE: the fresh session moves the idempotency key with it" no
+grep -q "can never be used again" "$TMP/log.pruned" \
+  && check "$PRUNED_CODE: the notice says the id was deleted" yes \
+  || check "$PRUNED_CODE: the notice says the id was deleted" no
+stop_fake
+done
+
+echo "== pruned ids are walked past, beyond the stuck budget of three =="
+start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,409,409,409,202],"conflict_code":"not_found","request_log":"'"$TMP"'/requests.log"}'
+: > "$TMP/requests.log"
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.walk" 2>&1; rc=$?
+[[ $rc -eq 0 ]] && grep -q '"session_id": "hermes-review-acme-widgets-42-5"' "$TMP/requests.log" \
+  && check "four pruned ids are skipped and the fifth session dispatches" yes \
+  || { check "four pruned ids are skipped and the fifth session dispatches" no; sed 's/^/        /' "$TMP/log.walk" | tail -8; }
+stop_fake
+
+echo "== a pruned-out give-up is a failure that says so =="
+start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,409,409,409,409,409,409,409,409,409],"conflict_code":"not_found","request_log":"'"$TMP"'/requests.log"}'
+: > "$TMP/requests.log"
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.prunedcap" 2>&1; rc=$?
+[[ $rc -ne 0 && $(grep -c '"method": "POST"' "$TMP/requests.log") -eq 8 ]] \
+  && grep -q "NOT dispatched" "$TMP/log.prunedcap" && grep -q "pruned" "$TMP/log.prunedcap" \
+  && check "eight pruned ids give up with a message that names the prune" yes \
+  || { check "eight pruned ids give up with a message that names the prune" no; sed 's/^/        /' "$TMP/log.prunedcap" | tail -6; }
+stop_fake
+
 echo "== the legacy path says a refusal is a refusal =="
 export USE_RUNS="false"
 start_fake '{"legacy_code":409,"request_log":"'"$TMP"'/requests.log"}'
@@ -696,6 +743,14 @@ start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,202],"co
 [[ $(cat "$FAKE_MARKER_COUNTER") -le 2 ]] \
   && check "an admission_conflict does not wait for a marker" yes \
   || check "an admission_conflict does not wait for a marker" no
+stop_fake
+# a pruned session needs no marker either
+: > "$FAKE_MARKER_COUNTER"; export FAKE_MARKER_AFTER=99
+start_fake '{"run_statuses":{"run_dead":"failed"},"dispatch_codes":[409,202],"conflict_code":"not_found","request_log":"'"$TMP"'/requests.log"}'
+( set -uo pipefail; . "$TMP/run.sh" ) > "$TMP/log.noprunewait" 2>&1
+[[ $(cat "$FAKE_MARKER_COUNTER") -le 2 ]] \
+  && check "a pruned session does not wait for a marker" yes \
+  || check "a pruned session does not wait for a marker" no
 stop_fake
 unset FAKE_MARKER_AFTER FAKE_MARKER_COUNTER
 

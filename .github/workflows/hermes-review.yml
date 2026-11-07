@@ -1060,7 +1060,15 @@ jobs:
             # The dispatch is a loop: a 409 whose run has died is retried
             # under a deeper key (see the 409 arm below), and a fresh attempt
             # is a fresh key — never the same one twice.
-            for ATTEMPT in 1 2 3; do
+            # Three attempts for key conflicts. A session refusal (below) is a different
+            # axis -- a stuck session or a pruned id says nothing about the key -- so it
+            # refunds its attempt and is bounded by its own counters instead: a pruned id
+            # must not eat the attempts a stuck session needs, nor the other way round.
+            ATTEMPT=0
+            STUCK_REFUSALS=0
+            RETIRED_SKIPS=0
+            while (( ATTEMPT < 3 )); do
+            ATTEMPT=$(( ATTEMPT + 1 ))
             set +e
             HTTP_CODE=$(curl -sS -m 30 -o "$RESP" -w '%{http_code}' \
               -X POST "$API_URL/v1/runs" \
@@ -1095,10 +1103,24 @@ jobs:
               #     earlier conflict and never recovers (NousResearch/hermes-agent#142731),
               #     so every later round for that PR is refused at the door. A fresh
               #     session id gets the PR moving again.
+              #   * not_found / session_deleted (with a session id): the session was
+              #     DELETED -- Hermes' idle-session prune removes it and fences its id
+              #     with a permanent tombstone, so the id can never be used again. Same
+              #     answer as a stuck one (a fresh session id), with a larger budget
+              #     because a pruned id never comes back (see RETIRED_SKIPS below).
               # In neither case does the 409 mean "a review is running" — that is what
               # the in-flight ledger is for, and it has already run: it skips when a
               # review of this head is live and stops one that went stale.
               CONFLICT_CODE=$(jq -r '.error.code // "idempotency_key_conflict"' "$RESP" 2>/dev/null || echo idempotency_key_conflict)
+              # Which refusals are about the SESSION rather than the key. A not_found with no
+              # session id (an issue triage sends none) is not one: it stays on the key path.
+              SESSION_REFUSAL=""
+              case "$CONFLICT_CODE" in
+                admission_conflict) SESSION_REFUSAL="stuck" ;;
+                not_found|session_deleted)
+                  if [[ -n "$SESSION_ID" ]]; then SESSION_REFUSAL="retired"; fi
+                  ;;
+              esac
               MARKER_RUN=""
               EXISTING_STATUS=""
               # The marker for this range is on this head, so the head's own
@@ -1116,9 +1138,9 @@ jobs:
                 # marker: the marker is written AFTER the dispatch, so the two
                 # can race within the same second (seen live on
                 # mullion-session-manager#1789). Give it a short window before
-                # reporting a failure. An admission_conflict needs no marker, so
+                # reporting a failure. A session refusal needs no marker, so
                 # it does not wait.
-                if [[ -z "$MARKER_RUN" && "$CONFLICT_CODE" != "admission_conflict" ]]; then
+                if [[ -z "$MARKER_RUN" && -z "$SESSION_REFUSAL" ]]; then
                   for (( WAIT = 1; WAIT <= ${HERMES_MARKER_WAIT_TRIES:-6}; WAIT++ )); do
                     sleep "${HERMES_MARKER_WAIT_INTERVAL:-5}"
                     MARKER_RUN=$(find_marker_run)
@@ -1135,7 +1157,7 @@ jobs:
                   set -e
                 fi
               fi
-              if [[ "$CONFLICT_CODE" == "admission_conflict" ]]; then
+              if [[ -n "$SESSION_REFUSAL" ]]; then
                 # The SESSION refused the turn. The key was never the issue: the
                 # session this PR's reviews run in is stuck (it was paused on an
                 # earlier conflict and never recovers), so every later round for
@@ -1158,14 +1180,30 @@ jobs:
                       ;;
                   esac
                 fi
+                if [[ "$SESSION_REFUSAL" == "retired" ]]; then
+                  RETIRED_SKIPS=$(( RETIRED_SKIPS + 1 ))
+                  if (( RETIRED_SKIPS >= 8 )); then
+                    echo "::error::Hermes deleted (pruned) $RETIRED_SKIPS session ids for this pull request (last: '$SESSION_ID', HTTP 409: $CONFLICT_CODE), and a deleted id can never be used again — review NOT dispatched. Retrying will not help until Hermes keeps review sessions longer."
+                    exit 1
+                  fi
+                  echo "::notice::session '$SESSION_ID' was deleted by Hermes (pruned; HTTP 409: $CONFLICT_CODE) and its id can never be used again; retrying in a fresh one."
+                else
+                  STUCK_REFUSALS=$(( STUCK_REFUSALS + 1 ))
+                  if (( STUCK_REFUSALS >= 3 )); then
+                    echo "::error::Every attempt to dispatch the review was refused (HTTP 409) — review NOT dispatched. Hermes' session authority refused the turn in $STUCK_REFUSALS sessions (last: '$SESSION_ID'); nothing was queued."
+                    exit 1
+                  fi
+                  echo "::notice::Hermes' session authority refused the turn for session '$SESSION_ID' (HTTP 409: admission_conflict) — that session is stuck and refuses every later round of this pull request; retrying in a fresh one."
+                fi
                 SESSION_ATTEMPT=$(( SESSION_ATTEMPT + 1 ))
-                echo "::notice::Hermes' session authority refused the turn for session '$SESSION_ID' (HTTP 409: admission_conflict) — that session is stuck and refuses every later round of this pull request; retrying in a fresh one."
                 SESSION_ID="${BASE_SESSION_ID}-${SESSION_ATTEMPT}"
                 IDEMPOTENCY_KEY="${IDEMPOTENCY_KEY}#session-${SESSION_ATTEMPT}"
                 FRESH_SESSION=1
                 build_msg
                 RUN_BODY=$(jq -nc --arg model "$API_MODEL" --arg input "$MSG" --arg session "$SESSION_ID" \
                   '{model:$model,input:$input} + (if $session == "" then {} else {session_id:$session} end)')
+                # A session refusal is not a failed attempt at the key: refund it.
+                ATTEMPT=$(( ATTEMPT - 1 ))
                 continue
               fi
               if [[ -z "$MARKER_RUN" ]]; then
