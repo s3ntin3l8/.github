@@ -51,9 +51,9 @@ on:
         default: false
       baselines-hint:
         description: >-
-          When the PR moves a scene that has a committed baseline (visual-kit's `visual/baselines/`), add a note to the
+          When the PR moves a scene that has a committed baseline (see visual-kit's CONTRACT.md and the `visual-baseline` target), add a note to the
           sticky comment listing those shots and telling the author to regenerate the baselines (`/update-baselines` or
-          `make visual-baseline`). Only a hint: no check changes. Set true in repos that have committed baselines.
+          `make visual-baseline`). Only a hint: no check changes. A deleted or renamed baselined scene is not reported (the report marks no baseline on removed shots). Set true in repos that have committed baselines.
         required: false
         type: boolean
         default: false
