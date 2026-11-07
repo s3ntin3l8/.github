@@ -49,6 +49,14 @@ on:
         required: false
         type: boolean
         default: false
+      baselines-hint:
+        description: >-
+          When the PR moves a scene that has a committed baseline (see visual-kit's CONTRACT.md and the `visual-baseline` target), add a note to the
+          sticky comment listing those shots and telling the author to regenerate the baselines (`/update-baselines` or
+          `make visual-baseline`). Only a hint: no check changes. A deleted or renamed baselined scene is not reported (the report marks no baseline on removed shots). Set true in repos that have committed baselines.
+        required: false
+        type: boolean
+        default: false
       timeout-minutes:
         required: false
         type: number
@@ -145,6 +153,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
+          BASELINES_HINT: ${{ inputs.baselines-hint }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -161,6 +170,15 @@ jobs:
             fi
           else
             body="## Visual check"$'\n\n'"The check produced no report; see the run log."
+          fi
+          # Shots with a committed baseline that this PR moves: the author has to move the baselines with it, or `main`'s
+          # go stale and every later PR shows the same scenes as changed. Only ever a note: any failure here (no
+          # summary.json, not JSON, no jq) leaves the comment as it was.
+          if [ "$BASELINES_HINT" = true ] && [ -f "$REPORT_PATH/summary.json" ]; then
+            moved=$(jq -r '.entries[] | select(.baseline == true and .result == "changed") | "- `\(.file)`"' "$REPORT_PATH/summary.json" 2>/dev/null || true)
+            if [ -n "$moved" ]; then
+              body="$body"$'\n\n'"### Committed baselines are out of date"$'\n\n'"This change moves shots that have a committed baseline:"$'\n\n'"$moved"$'\n\n'"If that is intended, comment \`/update-baselines\` (or run \`make visual-baseline\`) so the baselines move with it; otherwise \`main\`'s go stale."
+            fi
           fi
           body="$marker"$'\n'"$body"$'\n\n'"[Full report (before / after / diff)]($RUN_URL) is the \`visual-check-report\` artifact of this run."
           # Collect first, then take the first line: `gh api --paginate | head -n1` takes SIGPIPE (141) once head
