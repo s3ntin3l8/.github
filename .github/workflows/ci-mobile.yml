@@ -52,7 +52,7 @@ on:
         description: "sdkmanager packages for the Android job, excluding the NDK (the NDK is always appended from android-ndk-version). Default keeps API 35 so existing callers do not change."
         required: false
         type: string
-        default: "platform-tools platforms;android-35 build-tools;35.0.0"
+        default: "platform-tools platforms;android-35 platforms;android-37.0 build-tools;35.0.0 build-tools;36.0.0"
 
 jobs:
   test-android:
