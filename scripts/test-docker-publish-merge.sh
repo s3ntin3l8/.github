@@ -104,13 +104,13 @@ new_case() {
   export REGISTRY=ghcr.io IMAGE_NAME=o/img IMAGE_SLUG=o-img VERSION=1.2.3
   export GITHUB_RUN_ID=77 GITHUB_RUN_ATTEMPT=2
   export DOCKER_METADATA_OUTPUT_JSON='{"tags":["ghcr.io/o/img:1.2.3","ghcr.io/o/img:latest"]}'
-  mkdir -p "/tmp/digests/$IMAGE_SLUG"
-  : > "/tmp/digests/$IMAGE_SLUG/1111"; : > "/tmp/digests/$IMAGE_SLUG/2222"
+  mkdir -p "/tmp/digests/$GITHUB_RUN_ID/$IMAGE_SLUG"
+  : > "/tmp/digests/$GITHUB_RUN_ID/$IMAGE_SLUG/1111"; : > "/tmp/digests/$GITHUB_RUN_ID/$IMAGE_SLUG/2222"
   unset FAKE_COSIGN FAKE_AUDIT_FAIL FAKE_TAG_DIGEST AUDIT_COMMAND
   # A skipped step's outputs expand to the empty string in Actions, not to "unset".
   export CANDIDATE_DIGEST= IMAGE_REF= AUDITED_DIGEST=
 }
-end_case() { rm -rf "/tmp/digests/$IMAGE_SLUG"; }
+end_case() { rm -rf "/tmp/digests/$GITHUB_RUN_ID/$IMAGE_SLUG"; }
 
 check() { # check <description> <condition-exit-code>
   if [ "$2" -eq 0 ]; then PASS=$((PASS + 1)); echo "  ok   $1"

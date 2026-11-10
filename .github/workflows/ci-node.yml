@@ -4,7 +4,12 @@ on:
   workflow_call:
     inputs:
       runner:
-        description: "Runner label for every job, e.g. a self-hosted label. Defaults to GitHub-hosted."
+        description: >-
+          Runner label for every job, e.g. a self-hosted label. Defaults to
+          GitHub-hosted. This workflow is `pull_request`-triggered, so on a
+          PUBLIC consumer a fork PR's code would run on a self-hosted runner:
+          only point a private repo (or a runner behind the trust boundary
+          hermes.yml describes) at it.
         required: false
         type: string
         default: 'ubuntu-latest'

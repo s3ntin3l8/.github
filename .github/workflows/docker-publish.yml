@@ -309,11 +309,11 @@ jobs:
             echo "${delim}"
           } >> "$GITHUB_OUTPUT"
 
-      # Only needed for the fallback case (a non-amd64 platform on a runner that is not arm64:
-      # the amd64 fallback, or any platform pinned to a custom `runner`).
-      # Native amd64/arm64 builds skip this entirely.
+      # Needed whenever the platform is not the runner's own architecture (the amd64 fallback
+      # for exotic platforms, or a custom `runner` of the other arch). Keyed on the runner's
+      # real architecture, not its label. Native builds skip this entirely.
       - name: Set up QEMU
-        if: ${{ matrix.platform != 'linux/amd64' && matrix.runner != 'ubuntu-24.04-arm' }}
+        if: ${{ !((matrix.platform == 'linux/amd64' && runner.arch == 'X64') || (matrix.platform == 'linux/arm64' && runner.arch == 'ARM64')) }}
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Docker Buildx
@@ -388,13 +388,15 @@ jobs:
           IMAGE_SLUG: ${{ needs.prepare.outputs.image-slug }}
           BUILD_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          # Per-image subdir so two same-run invocations (one per image) never share a
-          # `/tmp/digests` flat namespace — see merge's `docker buildx imagetools create`
+          # Per-run, per-image subdir: a persistent (self-hosted) runner keeps /tmp between
+          # runs, and the merge globs every file in here, so a second run would fold the first
+          # run's digests into its manifest. Per-image so two same-run invocations (one per
+          # image) never share a `/tmp/digests` flat namespace — see merge's `docker buildx imagetools create`
           # below, which globs every file in here and assumes they all belong to this
           # invocation's `image-name`.
-          mkdir -p "/tmp/digests/${IMAGE_SLUG}"
+          mkdir -p "/tmp/digests/${GITHUB_RUN_ID}/${IMAGE_SLUG}"
           digest="$BUILD_DIGEST"
-          touch "/tmp/digests/${IMAGE_SLUG}/${digest#sha256:}"
+          touch "/tmp/digests/${GITHUB_RUN_ID}/${IMAGE_SLUG}/${digest#sha256:}"
 
       - name: Upload digest
         if: ${{ needs.prepare.outputs.push == 'true' }}
@@ -408,7 +410,7 @@ jobs:
           # occur inside a slug (image-name has already had `/` and `:` replaced with
           # `-`), so it's a safe, unambiguous separator.
           name: digests-${{ needs.prepare.outputs.image-slug }}--${{ steps.arch.outputs.slug }}
-          path: /tmp/digests/${{ needs.prepare.outputs.image-slug }}/*
+          path: /tmp/digests/${{ github.run_id }}/${{ needs.prepare.outputs.image-slug }}/*
           if-no-files-found: error
           retention-days: 1
 
@@ -435,7 +437,7 @@ jobs:
           # `/tmp/digests/<image-slug>/` layout on its own. Pointing `path` at the
           # per-image dir and flattening with `merge-multiple` is what makes the
           # `working-directory` below (and its `*` glob) valid.
-          path: /tmp/digests/${{ needs.prepare.outputs.image-slug }}
+          path: /tmp/digests/${{ github.run_id }}/${{ needs.prepare.outputs.image-slug }}
           # image-slug-scoped, `--`-delimited so this invocation only pulls the
           # digests it produced (see the matching comment on `Upload digest`).
           pattern: digests-${{ needs.prepare.outputs.image-slug }}--*
@@ -512,7 +514,7 @@ jobs:
           IMAGE_SLUG: ${{ needs.prepare.outputs.image-slug }}
           IMAGE_NAME: ${{ inputs.image-name }}
         run: |
-          cd "/tmp/digests/${IMAGE_SLUG}"
+          cd "/tmp/digests/${GITHUB_RUN_ID}/${IMAGE_SLUG}"
           mapfile -t tags < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
           digest_args=()
           for digest_file in *; do
@@ -541,7 +543,7 @@ jobs:
           IMAGE_NAME: ${{ inputs.image-name }}
         run: |
           set -euo pipefail
-          cd "/tmp/digests/${IMAGE_SLUG}"
+          cd "/tmp/digests/${GITHUB_RUN_ID}/${IMAGE_SLUG}"
           digest_args=()
           for digest_file in *; do
             digest_args+=("${REGISTRY}/${IMAGE_NAME}@sha256:${digest_file}")
