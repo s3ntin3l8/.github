@@ -63,6 +63,8 @@ on:
       # keeps the GitHub-hosted mapping: ubuntu-24.04 for amd64, ubuntu-24.04-arm for arm64.
       # Set it to a self-hosted label to build on your own runner: every platform then builds
       # there, so request only the runner's own architecture (a foreign one is emulated by QEMU).
+      # Callers run this on `pull_request`, so on a PUBLIC repo a fork PR would build on that
+      # runner: only point a private repo (or a runner behind the hermes.yml trust boundary) at it.
       runner:
         required: false
         type: string
@@ -388,15 +390,15 @@ jobs:
           IMAGE_SLUG: ${{ needs.prepare.outputs.image-slug }}
           BUILD_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          # Per-run, per-image subdir: a persistent (self-hosted) runner keeps /tmp between
+          # Per-attempt, per-image subdir (a re-run keeps the run id): a persistent (self-hosted) runner keeps /tmp between
           # runs, and the merge globs every file in here, so a second run would fold the first
           # run's digests into its manifest. Per-image so two same-run invocations (one per
           # image) never share a `/tmp/digests` flat namespace — see merge's `docker buildx imagetools create`
           # below, which globs every file in here and assumes they all belong to this
           # invocation's `image-name`.
-          mkdir -p "/tmp/digests/${GITHUB_RUN_ID}/${IMAGE_SLUG}"
+          mkdir -p "/tmp/digests/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${IMAGE_SLUG}"
           digest="$BUILD_DIGEST"
-          touch "/tmp/digests/${GITHUB_RUN_ID}/${IMAGE_SLUG}/${digest#sha256:}"
+          touch "/tmp/digests/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${IMAGE_SLUG}/${digest#sha256:}"
 
       - name: Upload digest
         if: ${{ needs.prepare.outputs.push == 'true' }}
@@ -410,7 +412,7 @@ jobs:
           # occur inside a slug (image-name has already had `/` and `:` replaced with
           # `-`), so it's a safe, unambiguous separator.
           name: digests-${{ needs.prepare.outputs.image-slug }}--${{ steps.arch.outputs.slug }}
-          path: /tmp/digests/${{ github.run_id }}/${{ needs.prepare.outputs.image-slug }}/*
+          path: /tmp/digests/${{ github.run_id }}-${{ github.run_attempt }}/${{ needs.prepare.outputs.image-slug }}/*
           if-no-files-found: error
           retention-days: 1
 
@@ -437,7 +439,7 @@ jobs:
           # `/tmp/digests/<image-slug>/` layout on its own. Pointing `path` at the
           # per-image dir and flattening with `merge-multiple` is what makes the
           # `working-directory` below (and its `*` glob) valid.
-          path: /tmp/digests/${{ github.run_id }}/${{ needs.prepare.outputs.image-slug }}
+          path: /tmp/digests/${{ github.run_id }}-${{ github.run_attempt }}/${{ needs.prepare.outputs.image-slug }}
           # image-slug-scoped, `--`-delimited so this invocation only pulls the
           # digests it produced (see the matching comment on `Upload digest`).
           pattern: digests-${{ needs.prepare.outputs.image-slug }}--*
@@ -514,7 +516,7 @@ jobs:
           IMAGE_SLUG: ${{ needs.prepare.outputs.image-slug }}
           IMAGE_NAME: ${{ inputs.image-name }}
         run: |
-          cd "/tmp/digests/${GITHUB_RUN_ID}/${IMAGE_SLUG}"
+          cd "/tmp/digests/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${IMAGE_SLUG}"
           mapfile -t tags < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
           digest_args=()
           for digest_file in *; do
@@ -543,7 +545,7 @@ jobs:
           IMAGE_NAME: ${{ inputs.image-name }}
         run: |
           set -euo pipefail
-          cd "/tmp/digests/${GITHUB_RUN_ID}/${IMAGE_SLUG}"
+          cd "/tmp/digests/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${IMAGE_SLUG}"
           digest_args=()
           for digest_file in *; do
             digest_args+=("${REGISTRY}/${IMAGE_NAME}@sha256:${digest_file}")
