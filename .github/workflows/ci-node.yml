@@ -3,6 +3,16 @@ name: Node.js CI
 on:
   workflow_call:
     inputs:
+      runner:
+        description: >-
+          Runner label for every job, e.g. a self-hosted label. Defaults to
+          GitHub-hosted. This workflow is `pull_request`-triggered, so on a
+          PUBLIC consumer a fork PR's code would run on a self-hosted runner:
+          only point a private repo (or a runner behind the trust boundary
+          hermes.yml describes) at it.
+        required: false
+        type: string
+        default: 'ubuntu-latest'
       node-version:
         required: false
         type: string
@@ -218,7 +228,7 @@ jobs:
   # when both are set.
   shard-plan:
     if: ${{ fromJSON(inputs.test-shards) > 1 && inputs.test-shard-matrix == '' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 2
     permissions:
       contents: read
@@ -233,7 +243,7 @@ jobs:
           echo "shards=$shards" >> "$GITHUB_OUTPUT"
 
   lint-and-test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -552,7 +562,7 @@ jobs:
   test-shard:
     needs: shard-plan
     if: ${{ !cancelled() && fromJSON(inputs.test-shards) > 1 && (needs.shard-plan.result == 'success' || inputs.test-shard-matrix != '') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -683,7 +693,7 @@ jobs:
   test-merge:
     needs: test-shard
     if: ${{ always() && fromJSON(inputs.test-shards) > 1 }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 5
     permissions:
       contents: read

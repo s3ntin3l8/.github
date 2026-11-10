@@ -3,6 +3,11 @@ name: Release Please
 on:
   workflow_call:
     inputs:
+      runner:
+        description: "Runner label, e.g. a self-hosted label. Defaults to GitHub-hosted."
+        required: false
+        type: string
+        default: 'ubuntu-latest'
       config-file:
         required: false
         type: string
@@ -70,7 +75,7 @@ jobs:
     concurrency:
       group: release-please-${{ github.repository }}
       cancel-in-progress: false
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     permissions:
       contents: write
       pull-requests: write

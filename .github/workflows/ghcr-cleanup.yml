@@ -24,6 +24,11 @@ name: Cleanup GHCR
 on:
   workflow_call:
     inputs:
+      runner:
+        description: "Runner label, e.g. a self-hosted label. Defaults to GitHub-hosted."
+        required: false
+        type: string
+        default: 'ubuntu-latest'
       package-name:
         required: true
         type: string
@@ -66,7 +71,7 @@ on:
 
 jobs:
   cleanup:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     permissions:
       packages: write
     steps:

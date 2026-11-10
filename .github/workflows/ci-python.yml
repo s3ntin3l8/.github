@@ -17,7 +17,7 @@ on:
         type: string
         default: 'app'
       runner:
-        description: "Runner label(s) for the type-and-test job, e.g. a self-hosted label. Defaults to GitHub-hosted."
+        description: "Runner label for the lint and type-and-test jobs, e.g. a self-hosted label. Defaults to GitHub-hosted."
         required: false
         type: string
         default: 'ubuntu-latest'
@@ -72,7 +72,7 @@ jobs:
   # Fast, dependency-light feedback: ruff needs no ML/runtime deps, so this
   # reports in seconds instead of waiting behind type-and-test's full install.
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
