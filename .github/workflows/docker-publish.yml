@@ -416,6 +416,15 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      # The login above is a plain `docker login` (not docker/login-action, whose post step
+      # logged out), so the credential stays in ~/.docker/config.json. On a persistent
+      # (self-hosted) runner the next job inherits a stale, expired token, and pulling any
+      # public ghcr.io base image (`ghcr.io/astral-sh/uv`) then fails `denied: denied`.
+      # GitHub-hosted runners are fresh VMs and never saw this.
+      - name: Log out of the Container registry
+        if: ${{ always() }}
+        run: docker logout "$REGISTRY" || true
+
   # Assemble the per-arch digests into a single multi-arch manifest list, tag it,
   # and sign it. Skipped entirely for non-publishing (build-only) invocations.
   merge:
@@ -645,3 +654,12 @@ jobs:
               exit 1
             fi
           done
+
+      # The login above is a plain `docker login` (not docker/login-action, whose post step
+      # logged out), so the credential stays in ~/.docker/config.json. On a persistent
+      # (self-hosted) runner the next job inherits a stale, expired token, and pulling any
+      # public ghcr.io base image (`ghcr.io/astral-sh/uv`) then fails `denied: denied`.
+      # GitHub-hosted runners are fresh VMs and never saw this.
+      - name: Log out of the Container registry
+        if: ${{ always() }}
+        run: docker logout "$REGISTRY" || true
