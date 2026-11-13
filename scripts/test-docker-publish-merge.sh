@@ -198,6 +198,13 @@ for shape in $'false\ntrue' 'false | true'; do
   end_case
 done
 
+echo "i) the registry logout is the last docker call and clears both registries"
+new_case
+run_flow "${PLAIN[@]}" "Log out of the Container registry"; check "flow succeeds" $?
+[ "$(tail -n 2 "$CALL_LOG" | head -n 1)" = "docker logout ghcr.io" ]; check "logs out of the registry" $?
+[ "$(tail -n 1 "$CALL_LOG")" = "docker logout" ]; check "and of Docker Hub, last" $?
+end_case
+
 echo
 echo "passed: $PASS, failed: $FAIL"
 [ "$FAIL" -eq 0 ]
