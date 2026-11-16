@@ -65,6 +65,13 @@ on:
         required: false
         type: boolean
         default: false
+      footer:
+        description: >-
+          Markdown appended to the pull request body on every run that opens or updates it, for example a reminder of the comment command the
+          caller wires up (`/refresh-screenshots`). Empty (the default) adds nothing.
+        required: false
+        type: string
+        default: ''
       timeout-minutes:
         required: false
         type: number
@@ -90,12 +97,38 @@ jobs:
       ALLOW_JSON: ${{ inputs.allow-json }}
       BRANCH: ${{ inputs.branch }}
       TITLE: ${{ inputs.title }}
+      FOOTER: ${{ inputs.footer }}
       DOCKERFILE: ${{ inputs.dockerfile }}
       BASE_BRANCH: ${{ github.event.repository.default_branch }}
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
+      # A caller wires `/refresh-screenshots` as an `issue_comment` trigger. author_association is only a noise filter
+      # there (a read-only collaborator is a COLLABORATOR too), so the authoritative check is here, once for every caller.
+      - name: Refuse a commenter without write access
+        if: ${{ github.event_name == 'issue_comment' }}
+        env:
+          ACTOR: ${{ github.event.comment.user.login }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          # A failed lookup (a 5xx, a rate limit) is reported as that, not as "no access".
+          if ! perm=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq .permission 2>"$RUNNER_TEMP/perm.err"); then
+            reason="the permission lookup failed: $(head -c 200 "$RUNNER_TEMP/perm.err")"
+            perm=none
+          else
+            reason="@$ACTOR needs write access to this repository (permission: $perm)."
+          fi
+          case "$perm" in
+            admin|maintain|write) ;;
+            *)
+              echo "::error::$reason Not refreshing."
+              gh pr comment "$PR_NUMBER" --repo "$REPO" --body "**/refresh-screenshots** was not run: $reason" || true
+              exit 1
+              ;;
+          esac
+
       - name: Refuse a branch that is not a bot branch
         run: |
           case "$BRANCH" in
@@ -261,6 +294,10 @@ jobs:
             echo
             echo "Jitter-level differences in other images are included in the commit but did not trigger this PR."
             echo "This branch is rewritten by the next refresh; merge it or close it."
+            if [ -n "$FOOTER" ]; then
+              echo
+              printf '%s\n' "$FOOTER"
+            fi
           } > "$RUNNER_TEMP/body.md"
           number=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
           if [ -n "$number" ]; then
