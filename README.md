@@ -132,6 +132,7 @@ Keeps a repo's committed screenshots (README, PWA manifest) fresh. Runs the repo
 
 - **Caller permissions (required):** `contents: write`, `pull-requests: write`, `actions: write`.
 - **Inputs:** `target` (default `screenshots`), `paths` (default `docs/screenshots frontend/public/screenshots`), `max-diff-pixels` (default `20`), `branch` (default `bot/refresh-screenshots`; must start with `bot/`), `title` (default `chore: refresh screenshots`), `dockerfile` (default `visual/Dockerfile`), `python-version` / `node-version`, `allow-json` (default `false`, see below), `timeout-minutes` (default `45`).
+- **`footer`** (default empty): Markdown appended to the PR body on every run, e.g. a reminder of the comment command below. The body is rewritten each refresh, so text added by hand is lost; this is how to keep it.
 - **Why `actions: write`:** the branch and PR are made with `GITHUB_TOKEN`; GitHub then creates the PR's `pull_request` runs but holds them at `action_required` until a maintainer approves. The workflow approves them itself, only for the commit it just pushed and only on the `bot/` branch, so the required checks run without a click. No App, no secrets. If GitHub ever closes that path the fallback is a GitHub App.
 
 - **Tolerance applies twice:** to decide whether to open a PR at all, and to skip a re-push when the branch already holds the same render. If a repo's scenes differ by more than `max-diff-pixels` between two renders of an unchanged tree, every scheduled run will push a new commit (and restart CI); fix the scene's determinism or raise the input.
@@ -155,6 +156,22 @@ jobs:
       node-version: "26"
       paths: "docs/screenshots frontend/public/screenshots"
 ```
+
+**Refresh on demand from a PR comment** (the way `/update-baselines` works). The trigger has to live in the caller: add `issue_comment: { types: [created] }` to `on:`, and give the job an `if:` that lets only repository writers through, since `issue_comment` runs for every comment in the repo:
+
+```yaml
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  refresh:
+    if: ${{ github.event_name != 'issue_comment' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/refresh-screenshots') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) }}
+    uses: s3ntin3l8/.github/.github/workflows/visual-refresh.yml@main
+    with:
+      footer: "Out of date? Comment `/refresh-screenshots` on this pull request to regenerate it now (repository writers only)."
+```
+
+`issue_comment` runs from the default branch, so the trigger only takes effect once merged. A second job in the same workflow that `needs: refresh` with `!cancelled()` needs the same `if:`.
 
 ### [Visual-Baselines](.github/workflows/visual-baselines.yml)
 `/update-baselines` on a pull request regenerates the repo's committed visual baselines in CI (the pinned visual-kit image, the environment the check renders in) and pushes them to the PR branch as one commit, so contributors need no local Docker. Explicit command only, never on push. PNGs that differ from the committed ones by no more than `max-diff-pixels` are left as they are, so the commit holds only real changes; non-PNG/JSON changes abort the run.

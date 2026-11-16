@@ -65,6 +65,13 @@ on:
         required: false
         type: boolean
         default: false
+      footer:
+        description: >-
+          Markdown appended to the pull request body on every run, for example a reminder of the comment command the
+          caller wires up (`/refresh-screenshots`). Empty (the default) adds nothing.
+        required: false
+        type: string
+        default: ''
       timeout-minutes:
         required: false
         type: number
@@ -90,6 +97,7 @@ jobs:
       ALLOW_JSON: ${{ inputs.allow-json }}
       BRANCH: ${{ inputs.branch }}
       TITLE: ${{ inputs.title }}
+      FOOTER: ${{ inputs.footer }}
       DOCKERFILE: ${{ inputs.dockerfile }}
       BASE_BRANCH: ${{ github.event.repository.default_branch }}
       GH_TOKEN: ${{ github.token }}
@@ -261,6 +269,10 @@ jobs:
             echo
             echo "Jitter-level differences in other images are included in the commit but did not trigger this PR."
             echo "This branch is rewritten by the next refresh; merge it or close it."
+            if [ -n "$FOOTER" ]; then
+              echo
+              printf '%s\n' "$FOOTER"
+            fi
           } > "$RUNNER_TEMP/body.md"
           number=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
           if [ -n "$number" ]; then
