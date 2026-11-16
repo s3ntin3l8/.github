@@ -67,7 +67,7 @@ on:
         default: false
       footer:
         description: >-
-          Markdown appended to the pull request body on every run, for example a reminder of the comment command the
+          Markdown appended to the pull request body on every run that opens or updates it, for example a reminder of the comment command the
           caller wires up (`/refresh-screenshots`). Empty (the default) adds nothing.
         required: false
         type: string
@@ -104,6 +104,19 @@ jobs:
       REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
+      # A caller wires `/refresh-screenshots` as an `issue_comment` trigger. author_association is only a noise filter
+      # there (a read-only collaborator is a COLLABORATOR too), so the authoritative check is here, once for every caller.
+      - name: Refuse a commenter without write access
+        if: ${{ github.event_name == 'issue_comment' }}
+        env:
+          ACTOR: ${{ github.event.comment.user.login }}
+        run: |
+          perm=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq .permission 2>/dev/null || echo none)
+          case "$perm" in
+            admin|maintain|write) ;;
+            *) echo "::error::$ACTOR does not have write access to $REPO (permission: $perm); not refreshing."; exit 1 ;;
+          esac
+
       - name: Refuse a branch that is not a bot branch
         run: |
           case "$BRANCH" in
