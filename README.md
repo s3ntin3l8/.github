@@ -178,7 +178,7 @@ jobs:
       footer: "Out of date? Comment `/refresh-screenshots` on this pull request to regenerate it now (repository writers only)."
 ```
 
-`issue_comment` runs from the default branch, so the trigger only takes effect once merged. A second job in the same workflow that `needs: refresh` with `!cancelled()` needs the same `if:`.
+`issue_comment` runs from the default branch, so the trigger only takes effect once merged. The on-demand run shares the workflow's `concurrency` group (`visual-refresh-<repo>`, one refresh at a time), so a comment made while the scheduled refresh runs queues behind it. A commenter without write access gets a reply on the PR and the run fails. A second job in the same workflow that `needs: refresh` with `!cancelled()` needs the same `if:`.
 
 ### [Visual-Baselines](.github/workflows/visual-baselines.yml)
 `/update-baselines` on a pull request regenerates the repo's committed visual baselines in CI (the pinned visual-kit image, the environment the check renders in) and pushes them to the PR branch as one commit, so contributors need no local Docker. Explicit command only, never on push. PNGs that differ from the committed ones by no more than `max-diff-pixels` are left as they are, so the commit holds only real changes; non-PNG/JSON changes abort the run.

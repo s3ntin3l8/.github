@@ -110,11 +110,23 @@ jobs:
         if: ${{ github.event_name == 'issue_comment' }}
         env:
           ACTOR: ${{ github.event.comment.user.login }}
+          PR_NUMBER: ${{ github.event.issue.number }}
         run: |
-          perm=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq .permission 2>/dev/null || echo none)
+          set -euo pipefail
+          # A failed lookup (a 5xx, a rate limit) is reported as that, not as "no access".
+          if ! perm=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq .permission 2>"$RUNNER_TEMP/perm.err"); then
+            reason="the permission lookup failed: $(head -c 200 "$RUNNER_TEMP/perm.err")"
+            perm=none
+          else
+            reason="@$ACTOR needs write access to this repository (permission: $perm)."
+          fi
           case "$perm" in
             admin|maintain|write) ;;
-            *) echo "::error::$ACTOR does not have write access to $REPO (permission: $perm); not refreshing."; exit 1 ;;
+            *)
+              echo "::error::$reason Not refreshing."
+              gh pr comment "$PR_NUMBER" --repo "$REPO" --body "**/refresh-screenshots** was not run: $reason" || true
+              exit 1
+              ;;
           esac
 
       - name: Refuse a branch that is not a bot branch
