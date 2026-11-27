@@ -114,7 +114,9 @@ jobs:
   test-ios:
     name: iOS (Build & Test)
     runs-on: macos-15
-    timeout-minutes: 30
+    # 30 minutes for the build and tests, plus room for the Resolve step's
+    # worst case (an iOS platform download, capped at 20 minutes).
+    timeout-minutes: 50
     env:
       GOTOOLCHAIN: auto
     permissions:
@@ -175,33 +177,13 @@ jobs:
       # device exist, and fall back from the requested name to a device id.
       - name: Resolve iOS Simulator destination
         id: sim
+        # The iOS platform download below is several GB; fail it here, with a
+        # step-level diagnosis, rather than at the job's timeout.
+        timeout-minutes: 20
         env:
           IOS_DESTINATION: ${{ inputs.ios-destination }}
         run: |
           set -euo pipefail
-
-          ios_runtimes() {
-            xcrun simctl list -j runtimes available \
-              | jq -r '.runtimes[] | select(.platform == "iOS") | .identifier'
-          }
-          iphones() {
-            xcrun simctl list -j devices available \
-              | jq -r '.devices | to_entries[]
-                  | select(.key | contains("SimRuntime.iOS"))
-                  | .value[] | select(.name | startswith("iPhone"))
-                  | "\(.udid)\t\(.name)"'
-          }
-
-          if [ -z "$(ios_runtimes)" ]; then
-            echo "::warning::No iOS Simulator runtime available; downloading the iOS platform."
-            xcodebuild -downloadPlatform iOS
-          fi
-          runtime="$(ios_runtimes | tail -n 1)"
-          if [ -z "${runtime}" ]; then
-            echo "::error::No iOS Simulator runtime available for $(xcode-select -p)."
-            xcrun simctl list runtimes
-            exit 1
-          fi
 
           case "${IOS_DESTINATION}" in
             *"platform=iOS Simulator"*) ;;
@@ -211,27 +193,61 @@ jobs:
               ;;
           esac
 
+          # Newest available iOS runtime, by version rather than list order.
+          newest_ios_runtime() {
+            xcrun simctl list -j runtimes available \
+              | jq -r '[.runtimes[] | select(.platform == "iOS")]
+                  | sort_by(.version | split(".") | map(tonumber? // 0))
+                  | last | .identifier // empty'
+          }
+          # Every available device on an iOS runtime: udid, name, device type.
+          ios_devices() {
+            xcrun simctl list -j devices available \
+              | jq -r '.devices | to_entries[]
+                  | select(.key | contains("SimRuntime.iOS"))
+                  | .value[] | "\(.udid)\t\(.name)\t\(.deviceTypeIdentifier)"'
+          }
+
+          runtime="$(newest_ios_runtime)"
+          if [ -z "${runtime}" ]; then
+            echo "::warning::No iOS Simulator runtime available; downloading the iOS platform."
+            sudo xcodebuild -downloadPlatform iOS
+            runtime="$(newest_ios_runtime)"
+          fi
+          if [ -z "${runtime}" ]; then
+            echo "::error::No iOS Simulator runtime available for $(xcode-select -p)."
+            xcrun simctl list runtimes
+            exit 1
+          fi
+
           wanted="$(sed -nE 's/(^|.*,)name=([^,]+).*/\2/p' <<< "${IOS_DESTINATION}")"
-          devices="$(iphones)"
+          devices="$(ios_devices)"
           if [ -n "${wanted}" ] && cut -f2 <<< "${devices}" | grep -qxF "${wanted}"; then
             echo "destination=${IOS_DESTINATION}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          udid="$(head -n 1 <<< "${devices}" | cut -f1)"
-          if [ -z "${udid}" ]; then
-            devicetype="$(xcrun simctl list -j devicetypes \
-              | jq -r --arg n "${wanted:-iPhone 16}" \
-                  '[.devicetypes[] | select(.name | startswith("iPhone"))]
-                   | (map(select(.name == $n)) + .)[0].identifier // empty')"
-            if [ -z "${devicetype}" ]; then
-              echo "::error::No iPhone simulator device type available."
-              exit 1
-            fi
-            udid="$(xcrun simctl create "CI iPhone" "${devicetype}" "${runtime}")"
-            echo "::warning::No iPhone simulator found; created ${devicetype} on ${runtime} (${udid})."
+          # Requested device is missing: use its device type when this Xcode has
+          # one (so an iPad stays an iPad), otherwise an iPhone 16, otherwise the
+          # last iPhone type listed.
+          devicetype="$(xcrun simctl list -j devicetypes \
+            | jq -r --arg n "${wanted:-iPhone 16}" \
+                '.devicetypes as $all
+                 | ([$all[] | select(.name == $n)]
+                    + [$all[] | select(.name == "iPhone 16")]
+                    + ([$all[] | select(.identifier | test("iPhone"))] | reverse))
+                 | .[0].identifier // empty')"
+          if [ -z "${devicetype}" ]; then
+            echo "::error::No simulator device type for '${wanted}' and no iPhone device type available."
+            exit 1
+          fi
+
+          udid="$(awk -F '\t' -v t="${devicetype}" '$3 == t { print $1; exit }' <<< "${devices}")"
+          if [ -n "${udid}" ]; then
+            echo "::warning::Simulator '${wanted}' not found; using an existing ${devicetype} (${udid})."
           else
-            echo "::warning::Simulator '${wanted}' not found; using $(grep -F "${udid}" <<< "${devices}" | cut -f2) (${udid})."
+            udid="$(xcrun simctl create "CI ${devicetype##*.}" "${devicetype}" "${runtime}")"
+            echo "::warning::Simulator '${wanted}' not found; created ${devicetype} on ${runtime} (${udid})."
           fi
           echo "destination=platform=iOS Simulator,id=${udid}" >> "$GITHUB_OUTPUT"
 
