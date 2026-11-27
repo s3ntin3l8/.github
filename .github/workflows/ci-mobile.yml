@@ -197,7 +197,7 @@ jobs:
           newest_ios_runtime() {
             xcrun simctl list -j runtimes available \
               | jq -r '[.runtimes[] | select(.platform == "iOS")]
-                  | sort_by(.version | split(".") | map(tonumber? // 0))
+                  | sort_by((.version // "0") | split(".") | map(tonumber? // 0))
                   | last | .identifier // empty'
           }
           # Every available device on an iOS runtime: udid, name, device type.
@@ -218,6 +218,12 @@ jobs:
             echo "::error::No iOS Simulator runtime available for $(xcode-select -p)."
             xcrun simctl list runtimes
             exit 1
+          fi
+
+          # An explicit device id is the caller's choice: leave it to xcodebuild.
+          if grep -qE '(^|,)id=' <<< "${IOS_DESTINATION}"; then
+            echo "destination=${IOS_DESTINATION}" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           wanted="$(sed -nE 's/(^|.*,)name=([^,]+).*/\2/p' <<< "${IOS_DESTINATION}")"
