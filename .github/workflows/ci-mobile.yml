@@ -169,11 +169,77 @@ jobs:
             exit 1
           fi
 
+      # A macos-15 runner sometimes comes up with no iOS Simulator device for the
+      # selected Xcode: xcodebuild then lists only the "Any iOS Simulator Device"
+      # placeholder and exits 70 before building. Make sure a runtime and an iPhone
+      # device exist, and fall back from the requested name to a device id.
+      - name: Resolve iOS Simulator destination
+        id: sim
+        env:
+          IOS_DESTINATION: ${{ inputs.ios-destination }}
+        run: |
+          set -euo pipefail
+
+          ios_runtimes() {
+            xcrun simctl list -j runtimes available \
+              | jq -r '.runtimes[] | select(.platform == "iOS") | .identifier'
+          }
+          iphones() {
+            xcrun simctl list -j devices available \
+              | jq -r '.devices | to_entries[]
+                  | select(.key | contains("SimRuntime.iOS"))
+                  | .value[] | select(.name | startswith("iPhone"))
+                  | "\(.udid)\t\(.name)"'
+          }
+
+          if [ -z "$(ios_runtimes)" ]; then
+            echo "::warning::No iOS Simulator runtime available; downloading the iOS platform."
+            xcodebuild -downloadPlatform iOS
+          fi
+          runtime="$(ios_runtimes | tail -n 1)"
+          if [ -z "${runtime}" ]; then
+            echo "::error::No iOS Simulator runtime available for $(xcode-select -p)."
+            xcrun simctl list runtimes
+            exit 1
+          fi
+
+          case "${IOS_DESTINATION}" in
+            *"platform=iOS Simulator"*) ;;
+            *)
+              echo "destination=${IOS_DESTINATION}" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          wanted="$(sed -nE 's/(^|.*,)name=([^,]+).*/\2/p' <<< "${IOS_DESTINATION}")"
+          devices="$(iphones)"
+          if [ -n "${wanted}" ] && cut -f2 <<< "${devices}" | grep -qxF "${wanted}"; then
+            echo "destination=${IOS_DESTINATION}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          udid="$(head -n 1 <<< "${devices}" | cut -f1)"
+          if [ -z "${udid}" ]; then
+            devicetype="$(xcrun simctl list -j devicetypes \
+              | jq -r --arg n "${wanted:-iPhone 16}" \
+                  '[.devicetypes[] | select(.name | startswith("iPhone"))]
+                   | (map(select(.name == $n)) + .)[0].identifier // empty')"
+            if [ -z "${devicetype}" ]; then
+              echo "::error::No iPhone simulator device type available."
+              exit 1
+            fi
+            udid="$(xcrun simctl create "CI iPhone" "${devicetype}" "${runtime}")"
+            echo "::warning::No iPhone simulator found; created ${devicetype} on ${runtime} (${udid})."
+          else
+            echo "::warning::Simulator '${wanted}' not found; using $(grep -F "${udid}" <<< "${devices}" | cut -f2) (${udid})."
+          fi
+          echo "destination=platform=iOS Simulator,id=${udid}" >> "$GITHUB_OUTPUT"
+
       - name: Run iOS Unit Tests
         env:
           IOS_PROJECT: ${{ inputs.ios-project }}
           IOS_SCHEME: ${{ inputs.ios-scheme }}
-          IOS_DESTINATION: ${{ inputs.ios-destination }}
+          IOS_DESTINATION: ${{ steps.sim.outputs.destination }}
         run: |
           xcodebuild test \
             -project "${IOS_PROJECT}" \
